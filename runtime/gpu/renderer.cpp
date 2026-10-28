@@ -1376,6 +1376,8 @@ namespace gpu::renderer
             ShaderStage stage;
             uint64_t hash;
             TranslatedShader info;         // immutable once loaded
+            uint32_t dwords = 0;           // microcode size
+            bool exportsMemory = false;    // a VS with a memory export alloc (MemexportCopyBo2)
             std::mutex compileMutex;
             bool vertexCompiled = false;
             VkShaderModule module = VK_NULL_HANDLE;  // VS
@@ -7398,6 +7400,21 @@ void main()
             for (uint32_t i = 0; i < dwords; i++)
                 ucode[i] = __builtin_bswap32(words[i]);
             slot->info = TranslateShader(slot->stage, ucode.data(), dwords);
+            slot->dwords = dwords;
+            // A control-flow alloc of memory exports (type 3) before the first exec_end.
+            for (uint32_t i = 0; type == 0 && i + 2 < dwords && i < 3 * 64; i += 3)
+            {
+                const uint32_t halves[2] = { ucode[i + 1] & 0xFFFF, ucode[i + 2] >> 16 };
+                bool end = false;
+                for (uint32_t half : halves)
+                {
+                    const uint32_t opcode = (half >> 12) & 0xF;
+                    slot->exportsMemory |= opcode == 12 && ((half >> 9) & 3) == 3;
+                    end |= opcode == 2 || opcode == 4;
+                }
+                if (end || slot->exportsMemory)
+                    break;
+            }
             // deadpool-decomp: DP_DUMP_SHADERS=1 saves each translation (GLSL) and its microcode to
             // <caches>/shaders/ (game-derived: stays on this machine).
             static const bool dumpShaders = std::getenv("DP_DUMP_SHADERS") != nullptr;
@@ -7439,6 +7456,145 @@ void main()
         (type == 0 ? s_vs : s_ps) = slot.get();
     }
 
+    // armb02: BO2 copies streamed texture data on the GPU with two memexport vertex shaders in the
+    // game code (64 or 128 bytes a vertex): the low mips a texture already has, into its new
+    // allocation after the streamed base level. Dropping them left those mips holding other bytes
+    // (the menu's reflection cube read as RGBD with alpha 0: the overbright, flat 3D menu). They run
+    // here on the CPU, one vertex at a time. Ported from bo2-zm-nx (CopyMemexportBo2zm and its
+    // memexport Sink in app/src/native/render/bo2zm_native_render.cpp, GPL-3.0, Alvaro E. Pena;
+    // https://github.com/AlvaroEPena/bo2-zm-nx). Each reads 8-byte blocks through vertex fetch
+    // constant 95 (16_16_16_16 unsigned integers, swizzle yxwz) and exports them in groups of four
+    // (eM0-3) to element indices from c254/c255, eA = group * c255.xyxx + c0:
+    //   64 bytes:  r = c255.w * vertex; groups at r and c255.z + r (blocks 0-3, 4-7)
+    //   128 bytes: r = vertex * c254.x; groups at r, c255.z + r, c255.w + r, c254.y + r (0-15)
+    // Returns false if the vertex shader writes no memory. ARMB02_NO_MEMEXPORT=1 drops them again.
+    bool MemexportCopyBo2(const reg::VGT_DRAW_INITIATOR& initiator, uint32_t dmaBase, uint32_t dmaSizeValue)
+    {
+        if (!s_vs || !s_vs->exportsMemory)
+            return false;
+        static const bool s_off = [] { const char* v = std::getenv("ARMB02_NO_MEMEXPORT"); return v && v[0] == '1'; }();
+        static uint64_t s_draws = 0, s_elements = 0, s_rejected = 0;
+        const bool of128 = s_vs->dwords == 150;
+        if (s_off || (!of128 && s_vs->dwords != 81))
+        {
+            LogOnce(s_vs->hash ^ 0x3F01, "memexport vs_%016llx (%u dwords) skipped (not a BO2 copy shader)",
+                (unsigned long long)s_vs->hash, s_vs->dwords);
+            return true;
+        }
+        if (initiator.source_select == xenos::SourceSelect::kImmediate)
+            return true;
+        auto constant = [](uint32_t c, uint32_t k) { return std::bit_cast<float>(s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X + c * 4 + k]); };
+        const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 2 * 95];
+        const uint32_t vfAddress = vf[0] >> 2, vfSize = (vf[1] >> 2) & 0xFFFFFF, vfEndian = vf[1] & 3;
+        auto dmaSize = RegAt<reg::VGT_DMA_SIZE>(0);
+        dmaSize.value = dmaSizeValue;
+        IndexSource src{ initiator.source_select == xenos::SourceSelect::kDMA, dmaBase & 0x1FFFFFFF,
+            initiator.index_size == xenos::IndexFormat::kInt32, uint32_t(dmaSize.swap_mode) };
+        const uint32_t offset = s_regs[XE_GPU_REG_VGT_INDX_OFFSET] & 0xFFFFFF;
+        const uint32_t minIndex = s_regs[XE_GPU_REG_VGT_MIN_VTX_INDX] & 0xFFFFFF;
+        const uint32_t maxIndex = s_regs[XE_GPU_REG_VGT_MAX_VTX_INDX] & 0xFFFFFF;
+        const uint32_t blocks = of128 ? 16 : 8, groupCount = of128 ? 4 : 2;
+        const float scale[4] = { constant(255, 0), constant(255, 1), constant(255, 0), constant(255, 0) };
+        const float c0[4] = { constant(0, 0), constant(0, 1), constant(0, 2), constant(0, 3) };
+
+        struct Element { uint32_t address; uint32_t d[2]; };
+        std::vector<Element> writes;
+        writes.reserve(size_t(initiator.num_indices) * blocks);
+        uint32_t lo = UINT32_MAX, hi = 0;
+        for (uint32_t i = 0; i < initiator.num_indices; i++)
+        {
+            const uint32_t index = std::clamp((src.Get(i) + offset) & 0xFFFFFF, minIndex, maxIndex);
+            uint16_t r[16][4];
+            const uint32_t first = (of128 ? 64 : 16) * index + vfAddress;
+            for (uint32_t k = 0; k < blocks; k++)
+            {
+                uint32_t d[2];
+                for (uint32_t j = 0; j < 2; j++)
+                {
+                    const uint32_t a = first + 2 * k + j;
+                    d[j] = a >= vfAddress && a < vfAddress + vfSize ? GpuSwap(LoadPhysical(a << 2), vfEndian) : 0;
+                }
+                r[k][0] = uint16_t(d[0] >> 16);  // .y
+                r[k][1] = uint16_t(d[0]);        // .x
+                r[k][2] = uint16_t(d[1] >> 16);  // .w
+                r[k][3] = uint16_t(d[1]);        // .z
+            }
+            const float vertex = float(index);
+            float groups[4];
+            if (of128)
+            {
+                const float base = vertex * constant(254, 0);
+                groups[0] = base;
+                groups[1] = constant(255, 2) + base;
+                groups[2] = constant(255, 3) + base;
+                groups[3] = constant(254, 1) + base;
+            }
+            else
+            {
+                groups[0] = constant(255, 3) * vertex;
+                groups[1] = constant(255, 2) + groups[0];
+            }
+            for (uint32_t g = 0; g < groupCount; g++)
+            {
+                uint32_t a[4];
+                for (uint32_t k = 0; k < 4; k++)
+                    a[k] = std::bit_cast<uint32_t>(groups[g] * scale[k] + c0[k]);
+                // eA has to be a stream constant of 16_16_16_16 unsigned integers (the only kind
+                // these shaders write; anything else is counted and dropped).
+                const uint32_t z = a[2];
+                if ((a[0] >> 30) != 1 || (a[1] >> 23) != 0x96 || (a[2] >> 23) != 0x96 || (a[3] >> 23) != 0x96 ||
+                    ((z >> 8) & 0x3F) != 26 || ((z >> 16) & 1) || !((z >> 17) & 1))
+                {
+                    s_rejected++;
+                    continue;
+                }
+                const bool redBlue = (z >> 19) & 1;
+                const uint32_t endian = z & 7, element = a[1] & 0x7FFFFF, count = a[3] & 0x7FFFFF, base = a[0] << 2;
+                for (uint32_t e = 0; e < 4; e++)
+                {
+                    const uint16_t* v = r[g * 4 + e];
+                    uint32_t d[4] = { uint32_t(v[redBlue ? 2 : 0]) | (uint32_t(v[1]) << 16),
+                        uint32_t(v[redBlue ? 0 : 2]) | (uint32_t(v[3]) << 16), 0, 0 };
+                    // 8-in-64 and 8-in-128 reorder the dwords, then swap as 8-in-32.
+                    uint32_t endianE = endian;
+                    if (endianE == 4) { std::swap(d[0], d[1]); std::swap(d[2], d[3]); endianE = 2; }
+                    else if (endianE == 5) { std::swap(d[0], d[3]); std::swap(d[1], d[2]); endianE = 2; }
+                    for (uint32_t& w : d)
+                    {
+                        if (endianE == 1 || endianE == 2)
+                            w = ((w & 0x00FF00FFu) << 8) | ((w >> 8) & 0x00FF00FFu);
+                        if (endianE == 2 || endianE == 3)
+                            w = (w << 16) | (w >> 16);
+                    }
+                    if (element + e >= count)
+                        continue;  // past the stream's count: not written, as on the GPU
+                    const uint32_t address = (base + ((element + e) << 3)) & 0x1FFFFFFF;
+                    if (address + 8 > kSharedSize)
+                        continue;
+                    writes.push_back({ address, { d[0], d[1] } });
+                    lo = std::min(lo, address);
+                    hi = std::max(hi, address + 8);
+                }
+            }
+        }
+        s_draws++;
+        s_elements += writes.size();
+        if (lo < hi)
+        {
+            // The GPU stores the dwords little-endian; the pages count as written (textures reload).
+            auto store = [&] { for (const Element& w : writes) memcpy(s_sharedHost + w.address, w.d, 8); };
+            writewatch::GpuThreadWrite(s_sharedHost + lo, hi - lo, store);
+            writewatch::MarkWritten(lo, hi - lo, writewatch::Writer::kGpuStore, lo);
+        }
+        static const bool s_log = std::getenv("ARMB02_LOG_MEMEXPORT") != nullptr;
+        if (s_log && (s_draws <= 16 || s_draws % 500 == 0))
+            fprintf(stderr, "[memexport] draw %llu: vs_%016llx (%s), %u vertices: %zu elements at %08X-%08X; "
+                "in total %llu elements, %llu eA rejected\n", (unsigned long long)s_draws, (unsigned long long)s_vs->hash,
+                of128 ? "128 B" : "64 B", initiator.num_indices, writes.size(), lo == UINT32_MAX ? 0 : lo, hi,
+                (unsigned long long)s_elements, (unsigned long long)s_rejected);
+        return true;
+    }
+
     void Draw(uint32_t initiatorValue, uint32_t dmaBase, uint32_t dmaSizeValue)
     {
         if (!s_vk)
@@ -7451,6 +7607,8 @@ void main()
             Resolve();
             return;
         }
+        if (MemexportCopyBo2(initiator, dmaBase, dmaSizeValue))
+            return;
         if (edramMode != xenos::EdramMode::kColorDepth && edramMode != xenos::EdramMode::kDepthOnly)
             return;
         // Depth-only: no pixel shader runs (depth_only.h); the guest's stays
