@@ -14,6 +14,10 @@ if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(WARNING "XenonRecomp and its output are only tested with Clang 18 or later.")
 endif()
 
+# XenonRecomp's bundled fmt uses malloc/free without <cstdlib>, which clang 23's
+# headers no longer pull in for it.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include> $<$<COMPILE_LANGUAGE:CXX>:cstdlib>)
+
 # Host tools: XenonAnalyse, XenonRecomp, XenonUtils.
 add_subdirectory(tools/XenonRecomp)
 
