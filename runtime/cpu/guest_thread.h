@@ -68,6 +68,8 @@ struct GuestThread
     static uint32_t GetCurrentThreadId();
     static void SetLastError(uint32_t error);
     static void SetDefaultStackSize(size_t size);
+    // The XEX's static TLS template (XEX_HEADER_TLS_INFO), copied into every new thread.
+    static void SetStaticTls(const void* rawData, uint32_t rawSize, uint32_t dataSize);
     // The current thread's kernel object (for the 0xFFFFFFFE pseudo-handle).
     static KernelObject* GetCurrentThreadObject();
 

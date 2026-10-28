@@ -555,6 +555,9 @@ int main(int argc, char** argv)
     GuestMainParams params{ uint32_t(image.entry_point), DEFAULT_GUEST_STACK };
     if (auto* stack = static_cast<const be<uint32_t>*>(getOptHeaderPtr(file.data(), XEX_HEADER_DEFAULT_STACK_SIZE)))
         params.stackSize = std::max<uint32_t>(*stack, DEFAULT_GUEST_STACK);
+    // { slot count, raw data address, data size, raw data size }
+    if (auto* tls = static_cast<const be<uint32_t>*>(getOptHeaderPtr(file.data(), XEX_HEADER_TLS_INFO)); tls && tls[2] != 0)
+        GuestThread::SetStaticTls(g_memory.Translate(tls[1]), tls[3], tls[2]);
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);

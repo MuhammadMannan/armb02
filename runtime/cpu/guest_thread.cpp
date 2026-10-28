@@ -11,14 +11,25 @@
 #include <sys/resource.h>
 
 constexpr size_t PCR_SIZE = 0xAB0;
-constexpr size_t TLS_SIZE = 0x100;
+// armb02: the XEX's static TLS block (__declspec(thread) data) sits at the TLS pointer
+// (PCR+0), and games index it directly with offsets up to its data size (BO2: 0x1A70).
+// A fixed 0x100 let those stores run into the TEB, zeroing the thread id at +0x14C.
+static size_t TLS_SIZE = 0x100;
+static std::vector<uint8_t> s_tlsTemplate;
 constexpr size_t TEB_SIZE = 0x2E0;
 // SpeedBreaker: guest stack size comes from the XEX (SetDefaultGuestStackSize).
 static size_t STACK_SIZE = 0x40000;
 void GuestThread::SetDefaultStackSize(size_t size) { STACK_SIZE = size; }
 #define TOTAL_SIZE (PCR_SIZE + TLS_SIZE + TEB_SIZE + STACK_SIZE)
+#define TEB_OFFSET (PCR_SIZE + TLS_SIZE)
 
-constexpr size_t TEB_OFFSET = PCR_SIZE + TLS_SIZE;
+void GuestThread::SetStaticTls(const void* rawData, uint32_t rawSize, uint32_t dataSize)
+{
+    s_tlsTemplate.assign((const uint8_t*)rawData, (const uint8_t*)rawData + std::min(rawSize, dataSize));
+    // Slack past the data size for the game's own slot area right after it.
+    TLS_SIZE = std::max<size_t>(0x100, ((dataSize + 0xF) & ~size_t(0xF)) + 0x100);
+    fprintf(stderr, "[thread] static TLS %u bytes (%u initialised), TLS block 0x%zX\n", dataSize, rawSize, TLS_SIZE);
+}
 
 // SpeedBreaker: small sequential ids (no xxHash). Each handle owns its id and
 // the new host thread adopts it, so the creator and the thread agree.
@@ -59,7 +70,10 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
     *(uint32_t*)(thread + 0x100) = ByteSwap(g_memory.MapVirtual(thread + PCR_SIZE + TLS_SIZE)); // teb pointer
     *(thread + 0x10C) = cpuNumber;
 
-    *(uint32_t*)(thread + PCR_SIZE + 0x10) = 0xFFFFFFFF; // that one TLS entry that felt quirky
+    if (!s_tlsTemplate.empty())
+        memcpy(thread + PCR_SIZE, s_tlsTemplate.data(), s_tlsTemplate.size());
+    else
+        *(uint32_t*)(thread + PCR_SIZE + 0x10) = 0xFFFFFFFF; // that one TLS entry that felt quirky
     *(uint32_t*)(thread + PCR_SIZE + TLS_SIZE + 0x14C) = ByteSwap(GuestThread::GetCurrentThreadId()); // thread id
 
     ppcContext.r1.u64 = g_memory.MapVirtual(thread + PCR_SIZE + TLS_SIZE + TEB_SIZE + STACK_SIZE); // stack pointer
