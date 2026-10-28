@@ -7409,6 +7409,17 @@ void main()
                 std::string stem = std::format("{}_{:016x}", type == 0 ? "vs" : "ps", h);
                 if (FILE* f = fopen((dir / (stem + ".glsl")).string().c_str(), "wb"))
                 {
+                    // armb02: the translation reads float constants compacted (u.c[base + k] is the
+                    // k-th constant the shader uses): the guest register behind each k, first.
+                    std::string map = "// float constants: ";
+                    for (uint32_t i = 0, k = 0; i < 256; i++)
+                        if ((slot->info.constUsed[i / 64] >> (i % 64)) & 1)
+                        {
+                            map += std::format("{}{}=c{}", k ? ", " : "", k, i);
+                            k++;
+                        }
+                    map += "\n";
+                    fwrite(map.data(), 1, map.size(), f);
                     fwrite(slot->info.glsl.data(), 1, slot->info.glsl.size(), f);
                     fclose(f);
                 }
