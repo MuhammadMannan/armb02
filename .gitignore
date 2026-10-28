@@ -1,0 +1,25 @@
+# Game data. Never commit anything from the player's own disc, title update or DLC.
+/private/
+*.iso
+*.xex
+*.xexp
+*.xcp
+*.ff
+*.ipak
+*.xpak
+*.sabs
+*.sabl
+
+# Recompiled C++ is derived from the game executable, so it stays local too.
+/ppc/
+
+# Build output
+/build/
+/out/
+.cache/
+compile_commands.json
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
