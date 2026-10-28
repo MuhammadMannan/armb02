@@ -202,6 +202,7 @@
       "XMsgStartIORequest",
       "XNetLogonGetTitleID",
       "XNotifyGetNext",
+      "XNotifyPositionUI",
       "XamAlloc",
       "XamContentClose",
       "XamContentCreateEnumerator",
@@ -223,6 +224,7 @@
       "XamShowDeviceSelectorUI",
       "XamShowSigninUI",
       "XamUserCheckPrivilege",
+      "XamUserGetDeviceContext",
       "XamUserGetName",
       "XamUserGetSigninInfo",
       "XamUserGetSigninState",
@@ -232,6 +234,7 @@
       "XamVoiceClose",
       "XamVoiceCreate",
       "XamVoiceHeadsetPresent",
+      "XamVoiceIsActiveProcess",
       "XamVoiceSubmitPacket"
     ],
     "stubbed": [
@@ -245,7 +248,6 @@
       "NetDll___WSAFDIsSet",
       "XCustomGetLastActionPress",
       "XMsgStartIORequestEx",
-      "XNotifyPositionUI",
       "XamBackgroundDownloadSetMode",
       "XamCreateEnumeratorHandle",
       "XamGetExecutionId",
@@ -261,8 +263,6 @@
       "XamShowMessageBoxUIEx",
       "XamUserAreUsersFriends",
       "XamUserGetAgeGroup",
-      "XamUserGetDeviceContext",
-      "XamVoiceIsActiveProcess",
       "XamWriteGamerTile"
     ]
   }

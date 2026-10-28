@@ -1,10 +1,10 @@
 # Imports: implemented by the runtime vs stubbed
 
-255 imports referenced by the recompiled code: 185 implemented, 70 stubbed (log and return 0).
+255 imports referenced by the recompiled code: 188 implemented, 67 stubbed (log and return 0).
 
-## xam: 70 implemented, 29 stubbed
+## xam: 73 implemented, 26 stubbed
 
-Stubbed: `NetDll_XNetConnect`, `NetDll_XNetGetConnectStatus`, `NetDll_XNetInAddrToString`, `NetDll_XNetQosGetListenStats`, `NetDll_XNetRegisterKey`, `NetDll_XNetXnAddrToMachineId`, `NetDll_XnpLogonGetStatus`, `NetDll___WSAFDIsSet`, `XCustomGetLastActionPress`, `XMsgStartIORequestEx`, `XNotifyPositionUI`, `XamBackgroundDownloadSetMode`, `XamCreateEnumeratorHandle`, `XamGetExecutionId`, `XamGetPrivateEnumStructureFromHandle`, `XamSessionCreateHandle`, `XamSessionRefObjByHandle`, `XamShowDirtyDiscErrorUI`, `XamShowFriendRequestUI`, `XamShowFriendsUI`, `XamShowGamerCardUIForXUID`, `XamShowKeyboardUI`, `XamShowMarketplaceUI`, `XamShowMessageBoxUIEx`, `XamUserAreUsersFriends`, `XamUserGetAgeGroup`, `XamUserGetDeviceContext`, `XamVoiceIsActiveProcess`, `XamWriteGamerTile`
+Stubbed: `NetDll_XNetConnect`, `NetDll_XNetGetConnectStatus`, `NetDll_XNetInAddrToString`, `NetDll_XNetQosGetListenStats`, `NetDll_XNetRegisterKey`, `NetDll_XNetXnAddrToMachineId`, `NetDll_XnpLogonGetStatus`, `NetDll___WSAFDIsSet`, `XCustomGetLastActionPress`, `XMsgStartIORequestEx`, `XamBackgroundDownloadSetMode`, `XamCreateEnumeratorHandle`, `XamGetExecutionId`, `XamGetPrivateEnumStructureFromHandle`, `XamSessionCreateHandle`, `XamSessionRefObjByHandle`, `XamShowDirtyDiscErrorUI`, `XamShowFriendRequestUI`, `XamShowFriendsUI`, `XamShowGamerCardUIForXUID`, `XamShowKeyboardUI`, `XamShowMarketplaceUI`, `XamShowMessageBoxUIEx`, `XamUserAreUsersFriends`, `XamUserGetAgeGroup`, `XamWriteGamerTile`
 
 ## xboxkrnl: 115 implemented, 41 stubbed
 

@@ -125,3 +125,48 @@ uint32_t XGetDisplaySize()
 
 GUEST_FUNCTION_HOOK(__imp__XGetVideoCapabilities, XGetVideoCapabilities);
 GUEST_FUNCTION_HOOK(__imp__XGetDisplaySize, XGetDisplaySize);
+
+// ---- Users, voice and notifications ----------------------------------------------------------
+
+// XamUserGetDeviceContext(user, unknown, out context): the controller a user signed in with. The
+// game reads 0 when this fails, so 0 is stored either way; as in Xenia, a signed-in user (every
+// user here, see XamUserGetSigninState) or 0xFF (any user) succeeds.
+uint32_t XamUserGetDeviceContext(uint32_t userIndex, uint32_t unknown, be<uint32_t>* context)
+{
+    if (context != nullptr)
+        *context = 0;
+    return userIndex < 4 || (userIndex & 0xFF) == 0xFF ? 0 : 0x48F;  // ERROR_DEVICE_NOT_CONNECTED
+}
+
+// XamVoiceIsActiveProcess(): whether this title owns the voice chat; no voice chat here.
+uint32_t XamVoiceIsActiveProcess()
+{
+    return 0;
+}
+
+// XNotifyPositionUI(position): where the system's notification toasts appear; there are none.
+uint32_t XNotifyPositionUI(uint32_t position)
+{
+    return 0;
+}
+
+GUEST_FUNCTION_HOOK(__imp__XamUserGetDeviceContext, XamUserGetDeviceContext);
+GUEST_FUNCTION_HOOK(__imp__XamVoiceIsActiveProcess, XamVoiceIsActiveProcess);
+GUEST_FUNCTION_HOOK(__imp__XNotifyPositionUI, XNotifyPositionUI);
+
+// ---- The game's fatal errors -----------------------------------------------------------------
+
+// Sys_Error (82408A90) formats its message on its own stack frame, at r1+96, then calls
+// Sys_SuspendOtherThreads (823802C0) and finally relaunches default.xex. The message never
+// reaches an import, so it is logged here, on the way into Sys_SuspendOtherThreads from there.
+PPC_FUNC_IMPL(__imp__sub_823802C0);
+PPC_FUNC(sub_823802C0)
+{
+    if (ctx.lr == 0x82408AF0)
+    {
+        const char* message = reinterpret_cast<const char*>(base + ctx.r1.u32 + 96);
+        fprintf(stderr, "[game] Sys_Error: %.1024s\n", message);
+        fflush(stderr);
+    }
+    __imp__sub_823802C0(ctx, base);
+}
