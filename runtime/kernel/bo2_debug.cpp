@@ -190,3 +190,117 @@ PPC_FUNC(sub_82380718)
         LockEventAdd(ctx, base, 'R', uint32_t(ctx.lr));
     __imp__sub_82380718(ctx, base);
 }
+
+// ARMB02_LOG_GAME=1: the game's own console text. The retail build compiles its prints out, but
+// their calls remain, folded into one empty function (82498858, 459 calls): Com_Printf-style
+// (channel in r3, format in r4, arguments from r5) and plain strings in r3 (Com_Error passes its
+// formatted message, 8368FC68, so). Printed as "[con] ...", formatted here from the guest's
+// arguments (r5-r10, then the caller's stack from r1+56; doubles arrive as raw 64-bit words).
+namespace
+{
+    bool GameLogEnabled()
+    {
+        static const bool enabled = [] { const char* v = std::getenv("ARMB02_LOG_GAME"); return v && v[0] == '1'; }();
+        return enabled;
+    }
+
+    // A guest pointer to a NUL-terminated, printable string of at most `max` characters.
+    bool GuestString(uint8_t* base, uint32_t address, std::string& out, size_t max = 1024)
+    {
+        if (address < 0x40000000u || address >= 0xC0000000u)  // heap and image ranges only
+            return false;
+        out.clear();
+        for (size_t i = 0; i < max; i++)
+        {
+            uint8_t c = base[address + i];
+            if (c == 0)
+                return !out.empty();
+            if (c < 0x20 && c != '\n' && c != '\t' && c != '\r' && c != '^')
+                return false;
+            if (c >= 0x7F)
+                return false;
+            out += char(c);
+        }
+        return false;
+    }
+
+    std::string FormatGuest(PPCContext& ctx, uint8_t* base, const std::string& fmt)
+    {
+        uint32_t next = 0;
+        auto arg = [&]() -> uint64_t {
+            const uint64_t regs[] = { ctx.r5.u64, ctx.r6.u64, ctx.r7.u64, ctx.r8.u64, ctx.r9.u64, ctx.r10.u64 };
+            uint32_t i = next++;
+            if (i < 6)
+                return regs[i];
+            return *reinterpret_cast<be<uint64_t>*>(base + ctx.r1.u32 + 56 + (i - 6) * 8);
+        };
+        std::string out;
+        for (size_t i = 0; i < fmt.size(); i++)
+        {
+            if (fmt[i] != '%' || i + 1 == fmt.size())
+            {
+                out += fmt[i];
+                continue;
+            }
+            size_t j = i + 1;
+            std::string spec = "%";
+            while (j < fmt.size() && strchr("-+ #0123456789.*hlLzjt", fmt[j]))
+            {
+                if (fmt[j] == '*')
+                    spec += std::to_string(int32_t(arg()));
+                else if (!strchr("hlLzjt", fmt[j]))
+                    spec += fmt[j];
+                j++;
+            }
+            if (j == fmt.size())
+                break;
+            char conv = fmt[j];
+            char buffer[512];
+            switch (conv)
+            {
+            case '%': out += '%'; break;
+            case 's':
+            {
+                std::string s;
+                uint32_t p = uint32_t(arg());
+                out += GuestString(base, p, s) ? s : std::format("<{:08X}>", p);
+                break;
+            }
+            case 'd': case 'i': snprintf(buffer, sizeof(buffer), (spec + "d").c_str(), int32_t(arg())); out += buffer; break;
+            case 'u': case 'x': case 'X': case 'o': case 'c':
+                snprintf(buffer, sizeof(buffer), (spec + conv).c_str(), uint32_t(arg())); out += buffer; break;
+            case 'p': snprintf(buffer, sizeof(buffer), "%08X", uint32_t(arg())); out += buffer; break;
+            case 'f': case 'g': case 'e': case 'F': case 'G': case 'E':
+                snprintf(buffer, sizeof(buffer), (spec + conv).c_str(), std::bit_cast<double>(arg())); out += buffer; break;
+            default: out += spec + conv; break;
+            }
+            i = j;
+        }
+        return out;
+    }
+}
+
+PPC_FUNC_IMPL(__imp__sub_82498858);
+PPC_FUNC(sub_82498858)
+{
+    if (GameLogEnabled())
+    {
+        std::string fmt, text;
+        if (GuestString(base, ctx.r4.u32, fmt) && (fmt.find('%') != std::string::npos || fmt.back() == '\n'))
+            text = FormatGuest(ctx, base, fmt);
+        else if (!GuestString(base, ctx.r3.u32, text))
+            text.clear();
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+            text.pop_back();
+        if (!text.empty())
+        {
+            static std::mutex mutex;
+            static std::string last;
+            std::lock_guard lock(mutex);
+            if (text != last)
+                fprintf(stderr, "[con] %s (lr %08X)\n", text.c_str(), uint32_t(ctx.lr));
+            last = text;
+        }
+    }
+    __imp__sub_82498858(ctx, base);
+}
