@@ -169,11 +169,19 @@ uint32_t NetDll_WSAGetLastError() { return t_wsaLastError; }
 void NetDll_WSASetLastError(uint32_t error) { t_wsaLastError = error; }
 
 uint32_t NetDll_XNetGetEthernetLinkStatus(uint32_t caller) { return 0; }  // no link
+// armb02: Black Ops II stops at start-up ("Unable to find an XNADDR.") without an address, so,
+// as in Xenia, the console reports a static local one: 127.0.0.1, no online address, and a
+// fixed locally administered MAC. Sockets still fail, so the game stays offline.
 uint32_t NetDll_XNetGetTitleXnAddr(uint32_t caller, uint8_t* addr)
 {
     if (addr != nullptr)
+    {
         memset(addr, 0, 0x24);
-    return 0x00000001;  // XNET_GET_XNADDR_NONE
+        *reinterpret_cast<be<uint32_t>*>(addr + 0) = 0x7F000001;  // ina
+        static constexpr uint8_t kEnet[6] = { 0x02, 0x41, 0x52, 0x4D, 0x42, 0x02 };
+        memcpy(addr + 10, kEnet, sizeof(kEnet));  // abEnet, after inaOnline and wPortOnline
+    }
+    return 0x00000002 | 0x00000004 | 0x00000020 | 0x00000040;  // XNET_GET_XNADDR_ETHERNET | STATIC | GATEWAY | DNS
 }
 
 uint32_t NetDll_socket(uint32_t caller, uint32_t af, uint32_t type, uint32_t protocol) { return NetFail(); }
