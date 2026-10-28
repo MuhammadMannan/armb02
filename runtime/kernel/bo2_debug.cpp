@@ -106,7 +106,7 @@ namespace
     struct LockEvent
     {
         double t;
-        uint32_t thread, lr, serving, next, owner;
+        uint32_t thread, lr, serving, next, owner, teb;
         char op;  // 'A' acquire entered, 'a' acquired, 'R' release
     };
     std::mutex s_lockMutex;
@@ -126,12 +126,14 @@ namespace
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     }
 
-    void LockEventAdd(uint8_t* base, char op, uint32_t lr)
+    void LockEventAdd(PPCContext& ctx, uint8_t* base, char op, uint32_t lr)
     {
         uint32_t thread = GuestThread::GetCurrentThreadId();
+        // What the game's own GetCurrentThreadId (825C15A0) sees: TEB (r13+0x100) + 0x14C.
+        const uint32_t teb = Word(base, Word(base, ctx.r13.u32 + 0x100) + 0x14C);
         std::lock_guard lock(s_lockMutex);
         s_lockRing[s_lockCount++ % 64] = { Now(), thread, lr, Word(base, 0x8372A9FC), Word(base, 0x8372A9FC + 412),
-            Word(base, 0x8372A9FC + 292), op };
+            Word(base, 0x8372A9FC + 292), teb, op };
         if (op == 'A')
             s_lockWaiting[thread] = Now();
         else if (op == 'a')
@@ -156,7 +158,7 @@ namespace
                         for (uint32_t i = s_lockCount > 64 ? s_lockCount - 64 : 0; i < s_lockCount; i++)
                         {
                             const LockEvent& e = s_lockRing[i % 64];
-                            fprintf(stderr, "[gpulock]   %.3f %c t%u lr=%08X serving %u next %u owner t%u\n", e.t, e.op, e.thread, e.lr,
+                            fprintf(stderr, "[gpulock]   %.3f %c t%u (teb id %u) lr=%08X serving %u next %u owner t%u\n", e.t, e.op, e.thread, e.teb, e.lr,
                                 e.serving, e.next, e.owner);
                         }
                         return;
@@ -176,15 +178,15 @@ PPC_FUNC(sub_82380570)
         return;
     }
     uint32_t lr = uint32_t(ctx.lr);
-    LockEventAdd(base, 'A', lr);
+    LockEventAdd(ctx, base, 'A', lr);
     __imp__sub_82380570(ctx, base);
-    LockEventAdd(base, 'a', lr);
+    LockEventAdd(ctx, base, 'a', lr);
 }
 
 PPC_FUNC_IMPL(__imp__sub_82380718);
 PPC_FUNC(sub_82380718)
 {
     if (LockLogEnabled())
-        LockEventAdd(base, 'R', uint32_t(ctx.lr));
+        LockEventAdd(ctx, base, 'R', uint32_t(ctx.lr));
     __imp__sub_82380718(ctx, base);
 }
