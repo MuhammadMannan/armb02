@@ -1,0 +1,28 @@
+# Black Ops II default.xex, title update v18: functions identified so far (address,name).
+# BO2Names.java applies these in a Ghidra project of your own executable.
+82380570,RenderLock_Acquire
+82380718,RenderLock_Release
+82380758,RenderLock_IsOwner
+8237AFD8,StreamThread
+8237AE90,Stream_Dequeue
+8237AB40,Stream_Read
+82408A90,Sys_Error
+823802C0,Sys_SuspendOtherThreads
+8237FA28,Sys_CreateThread
+823CFE40,Dvar_RegisterBool
+823DA718,WebM_DecodeJob
+823E90F8,Job_CheckProcessor
+825C15A0,Sys_GetCurrentThreadId
+825C23A8,Sys_GetCurrentProcessorNumber
+823E9178,Job_AddForProcessor
+823C9F78,Job_Add
+8262DA90,JobQueue_Push
+823DA768,WebM_StartDecoder
+823DA5A8,WebM_DecodeLoop
+823D9DD0,WebM_DecodeFrame
+823D93F0,WebM_PresentFrames
+823D9D60,WebM_IsReady
+82698F50,Movie_Open
+82699038,Movie_OpenCallback
+82699F18,Movie_Update
+8269A868,Movie_GetFrame
