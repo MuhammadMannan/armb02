@@ -83,3 +83,17 @@ PPC_FUNC(sub_8237AB40)
     __imp__sub_8237AB40(ctx, base);
     LogOnce(before + std::format(" -> {}", ctx.r3.u32 & 0xFF));
 }
+
+// ARMB02_SKIP_INTRO=1: register com_introPlayed (Dvar_RegisterBool, 823CFE40) as true, so the
+// game skips its intro movies, as it does once a profile has seen them.
+PPC_FUNC_IMPL(__imp__sub_823CFE40);
+PPC_FUNC(sub_823CFE40)
+{
+    static const bool skipIntro = [] { const char* v = std::getenv("ARMB02_SKIP_INTRO"); return v && v[0] == '1'; }();
+    if (skipIntro && ctx.r3.u32 == 0x82042C78)
+    {
+        fprintf(stderr, "[game] com_introPlayed registered as 1 (ARMB02_SKIP_INTRO)\n");
+        ctx.r4.u64 = 1;
+    }
+    __imp__sub_823CFE40(ctx, base);
+}
