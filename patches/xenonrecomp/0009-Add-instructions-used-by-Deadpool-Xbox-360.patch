@@ -1,0 +1,276 @@
+From 0938b111e6e07e74db1b578fa3cf518eedc238bf Mon Sep 17 00:00:00 2001
+From: deadpool-recomp <local@localhost>
+Date: Thu, 15 Oct 2026 13:28:36 -0500
+Subject: [PATCH] Add instructions used by Deadpool (Xbox 360)
+
+bdzf/bdnzt (decrement-and-branch on any CR bit; bdnzf now tests the real
+bit instead of assuming eq; all three treat a target outside the function
+as a tail call), addc, addme, subfze, eqv, the update forms of
+lhz/lha/lbzx/lhzx/lwzx/lfs/lfsx/lfd/lfdx/sth/sthx/stbx/stfsx/stfd, fnmadd,
+frsqrte, dcbst, vnor128, vpkuwus(128), vpkuhus128 and lvehx.
+
+vcmpbfp(128).: emit the CR6 update on the closing-brace line so the RC
+check (which inspects only the last line) no longer warns.
+---
+ XenonRecomp/recompiler.cpp | 201 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 197 insertions(+), 4 deletions(-)
+
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index b75a7ef..75d3499 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -2,6 +2,13 @@
+ #include "recompiler.h"
+ #include <xex_patcher.h>
+ 
++// Name of a CR bit (BI operand) as a field of the CR register struct.
++static const char* CrBitName(uint32_t bi)
++{
++    static const char* names[] = { "lt", "gt", "eq", "so" };
++    return names[bi & 3];
++}
++
+ static uint64_t ComputeMask(uint32_t mstart, uint32_t mstop)
+ {
+     mstart &= 0x3F;
+@@ -420,6 +427,23 @@ bool Recompiler::Recompile(
+             }
+         };
+ 
++    // Branch on an already-formatted condition; a target outside the function is a tail call.
++    auto printBranchIf = [&](const std::string& cond, size_t target)
++        {
++            if (target < fn.base || target >= fn.base + fn.size)
++            {
++                println("\tif ({}) {{", cond);
++                print("\t");
++                printFunctionCall(target);
++                println("\t\treturn;");
++                println("\t}}");
++            }
++            else
++            {
++                println("\tif ({}) goto loc_{:X};", cond, target);
++            }
++        };
++
+     auto printSetFlushMode = [&](bool enable)
+         {
+             auto newState = enable ? CSRState::VMX : CSRState::FPU;
+@@ -665,9 +689,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_BDNZF:
+-        // NOTE: assuming eq here as a shortcut because all the instructions in the game do that
+         println("\t--{}.u64;", ctr());
+-        println("\tif ({}.u32 != 0 && !{}.eq) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), insn.operands[1]);
++        printBranchIf(fmt::format("{}.u32 != 0 && !{}.{}", ctr(), cr(insn.operands[0] / 4), CrBitName(insn.operands[0])), insn.operands[1]);
+         break;
+ 
+     case PPC_INST_BEQ:
+@@ -1136,6 +1159,7 @@ bool Recompiler::Recompile(
+         println("\t{}.s64 = {};", r(insn.operands[0]), int32_t(insn.operands[1] << 16));
+         break;
+ 
++    case PPC_INST_LVEHX:
+     case PPC_INST_LVEWX:
+     case PPC_INST_LVEWX128:
+     case PPC_INST_LVX:
+@@ -1845,9 +1869,11 @@ bool Recompiler::Recompile(
+         println("\t\tsimde__m128 lt = simde_mm_cmpnge_ps(a, simde_mm_xor_ps(b, simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));");
+         println("\t\tsimde_mm_store_ps({}.f32, simde_mm_or_ps(simde_mm_and_ps(gt, simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))), "
+             "simde_mm_and_ps(lt, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x40000000)))));", v(insn.operands[0]));
++        // The CR6 update shares the closing brace's line: the RC check below only looks at the last line.
+         if (strchr(insn.opcode->name, '.'))
+-            println("\t\t{}.setFromMask(simde_mm_or_ps(gt, lt), 0xF);", cr(6));
+-        println("\t}}");
++            println("\t\t{}.setFromMask(simde_mm_or_ps(gt, lt), 0xF); }}", cr(6));
++        else
++            println("\t}}");
+         break;
+ 
+     case PPC_INST_VCMPEQFP:
+@@ -2155,6 +2181,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_VPKUHUS:
++    case PPC_INST_VPKUHUS128:
+         // Unsigned in, unsigned out: clamp to 0xFF first, since packus treats input as signed.
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi16(simde_mm_min_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_set1_epi16(0xFF)), simde_mm_min_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_set1_epi16(0xFF))));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
+         break;
+@@ -2235,6 +2262,172 @@ bool Recompiler::Recompile(
+         break;
+     // ---- end nfsmw-recomp additions ----
+ 
++    // ---- deadpool-recomp additions ----
++    // Decrement-and-branch on a CR bit. The compiler lowers small switches to
++    // `mtctr idx` + a chain of bdzf (one per case).
++    case PPC_INST_BDZF:
++        println("\t--{}.u64;", ctr());
++        printBranchIf(fmt::format("{}.u32 == 0 && !{}.{}", ctr(), cr(insn.operands[0] / 4), CrBitName(insn.operands[0])), insn.operands[1]);
++        break;
++
++    case PPC_INST_BDNZT:
++        println("\t--{}.u64;", ctr());
++        printBranchIf(fmt::format("{}.u32 != 0 && {}.{}", ctr(), cr(insn.operands[0] / 4), CrBitName(insn.operands[0])), insn.operands[1]);
++        break;
++
++    // Integer arithmetic with carry.
++    case PPC_INST_ADDC:
++        println("\t{}.ca = {}.u32 + {}.u32 < {}.u32;", xer(), r(insn.operands[1]), r(insn.operands[2]), r(insn.operands[1]));
++        println("\t{}.u64 = {}.u64 + {}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_ADDME:
++        // rD = rA + CA - 1; carry out unless rA == 0 and CA == 0.
++        println("\t{}.u64 = {}.u64 + {}.ca - 1;", temp(), r(insn.operands[1]), xer());
++        println("\t{}.ca = ({}.u32 != 0) | {}.ca;", xer(), r(insn.operands[1]), xer());
++        println("\t{}.u64 = {}.u64;", r(insn.operands[0]), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_SUBFZE:
++        // rD = ~rA + CA; carry out only when ~rA == 0xFFFFFFFF and CA == 1.
++        println("\t{}.u64 = ~{}.u64 + {}.ca;", temp(), r(insn.operands[1]), xer());
++        println("\t{}.ca = ({}.u32 == 0) & {}.ca;", xer(), r(insn.operands[1]), xer());
++        println("\t{}.u64 = {}.u64;", r(insn.operands[0]), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_EQV:
++        println("\t{}.u64 = ~({}.u64 ^ {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    // Loads and stores with update: D-form operands are (rT, d, rA), X-form (rT, rA, rB).
++    case PPC_INST_LHZU:
++        println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = PPC_LOAD_U16({});", r(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[2]), ea());
++        break;
++
++    case PPC_INST_LHAU:
++        println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.s64 = int16_t(PPC_LOAD_U16({}));", r(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[2]), ea());
++        break;
++
++    case PPC_INST_LBZUX:
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = PPC_LOAD_U8({});", r(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_LHZUX:
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = PPC_LOAD_U16({});", r(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_LWZUX:
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = PPC_LOAD_U32({});", r(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_LFSU:
++        printSetFlushMode(false);
++        println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u32 = PPC_LOAD_U32({});", temp(), ea());
++        println("\t{}.f64 = double({}.f32);", f(insn.operands[0]), temp());
++        println("\t{}.u32 = {};", r(insn.operands[2]), ea());
++        break;
++
++    case PPC_INST_LFSUX:
++        printSetFlushMode(false);
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u32 = PPC_LOAD_U32({});", temp(), ea());
++        println("\t{}.f64 = double({}.f32);", f(insn.operands[0]), temp());
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_LFDU:
++        printSetFlushMode(false);
++        println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = PPC_LOAD_U64({});", f(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[2]), ea());
++        break;
++
++    case PPC_INST_LFDUX:
++        printSetFlushMode(false);
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{}.u64 = PPC_LOAD_U64({});", f(insn.operands[0]), ea());
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_STHU:
++        println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(insn.operands[2]));
++        println("\tPPC_STORE_U16({}, {}.u16);", ea(), r(insn.operands[0]));
++        println("\t{}.u32 = {};", r(insn.operands[2]), ea());
++        break;
++
++    case PPC_INST_STHUX:
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\tPPC_STORE_U16({}, {}.u16);", ea(), r(insn.operands[0]));
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_STBUX:
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\tPPC_STORE_U8({}, {}.u8);", ea(), r(insn.operands[0]));
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_STFSUX:
++        printSetFlushMode(false);
++        println("\t{}.f32 = float({}.f64);", temp(), f(insn.operands[0]));
++        println("\t{} = {}.u32 + {}.u32;", ea(), r(insn.operands[1]), r(insn.operands[2]));
++        println("\tPPC_STORE_U32({}, {}.u32);", ea(), temp());
++        println("\t{}.u32 = {};", r(insn.operands[1]), ea());
++        break;
++
++    case PPC_INST_STFDU:
++        printSetFlushMode(false);
++        println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(insn.operands[2]));
++        println("\tPPC_STORE_U64({}, {}.u64);", ea(), f(insn.operands[0]));
++        println("\t{}.u32 = {};", r(insn.operands[2]), ea());
++        break;
++
++    // Floating point.
++    case PPC_INST_FNMADD:
++        printSetFlushMode(false);
++        println("\t{}.f64 = -({}.f64 * {}.f64 + {}.f64);", f(insn.operands[0]), f(insn.operands[1]), f(insn.operands[2]), f(insn.operands[3]));
++        break;
++
++    case PPC_INST_FRSQRTE:
++        printSetFlushMode(false);
++        println("\t{}.f64 = 1.0 / sqrt({}.f64);", f(insn.operands[0]), f(insn.operands[1]));
++        break;
++
++    case PPC_INST_DCBST:
++        // no op
++        break;
++
++    // VMX128.
++    case PPC_INST_VNOR128:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_xor_si128(simde_mm_or_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_set1_epi32(-1)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VPKUWUS:
++    case PPC_INST_VPKUWUS128:
++        // Unsigned in, unsigned out: clamp to 0xFFFF first, since packus treats input as signed.
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_packus_epi32(simde_mm_min_epu32(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_set1_epi32(0xFFFF)), simde_mm_min_epu32(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_set1_epi32(0xFFFF))));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    // ---- end deadpool-recomp additions ----
++
+     case PPC_INST_VSEL:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+-- 
+2.56.0
+

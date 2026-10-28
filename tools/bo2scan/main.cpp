@@ -6,8 +6,9 @@
 //   - the jump tables, written as a switch table TOML. BO2's compiler schedules
 //     the table load as lis/rlwinm/addi/lwzx/mtctr/bctr, which XenonAnalyse's
 //     Sonic Unleashed patterns (lis/addi/rlwinm/...) don't match.
-//   - explicit boundaries for functions that contain jump tables but have no
-//     .pdata entry, which XenonRecomp's analyser otherwise cuts short at the bctr.
+//   - explicit boundaries for functions that contain jump tables or `bdz` chains
+//     (small switches on CTR) but have no .pdata entry. XenonRecomp's analyser
+//     otherwise cuts them short at the bctr or the last bdz.
 
 #include <cstdio>
 #include <algorithm>
@@ -350,13 +351,46 @@ int main(int argc, char* argv[])
         }
     }
 
-    std::vector<FunctionRange> extraFunctions;
+    // Every jump table and every forward `bdz` is a site whose targets must stay
+    // inside the function that contains it.
+    struct JumpSite
+    {
+        size_t base{};
+        size_t last{};
+    };
+    std::vector<JumpSite> sites;
     for (const auto& table : switches)
+    {
+        size_t last = std::max<size_t>(table.base, table.defaultLabel);
+        for (uint32_t label : table.labels)
+            last = std::max<size_t>(last, label);
+        sites.push_back({ table.base, last });
+    }
+    for (const auto& section : image.sections)
+    {
+        if (!(section.flags & SectionFlags_Code))
+            continue;
+        for (size_t offset = 0; offset + 4 <= section.size; offset += 4)
+        {
+            uint32_t insn = ReadBE32(section.data + offset);
+            uint32_t bo = (insn >> 21) & 0x1F;
+            if ((insn >> 26) == 16 && (insn & 3) == 0 && (bo & 0x1E) == 0x12)
+            {
+                int32_t delta = int16_t(insn & 0xFFFC);
+                if (delta > 0)
+                    sites.push_back({ section.base + offset, section.base + offset + delta });
+            }
+        }
+    }
+    std::sort(sites.begin(), sites.end(), [](const JumpSite& a, const JumpSite& b) { return a.base < b.base; });
+
+    std::vector<FunctionRange> extraFunctions;
+    for (const auto& site : sites)
     {
         bool covered = false;
         for (const auto& fn : pdata)
         {
-            if (table.base >= fn.base && table.base < fn.base + fn.size)
+            if (site.base >= fn.base && site.base < fn.base + fn.size)
                 covered = true;
         }
         if (covered)
@@ -365,14 +399,12 @@ int main(int argc, char* argv[])
         const Section* section = nullptr;
         for (const auto& s : image.sections)
         {
-            if (s == table.base)
+            if (s == site.base)
                 section = &s;
         }
 
-        size_t start = FindFunctionStart(*section, table.base - section->base, 0x4000, &boundaries);
-        size_t last = std::max<size_t>(table.base, table.defaultLabel);
-        for (uint32_t label : table.labels)
-            last = std::max<size_t>(last, label);
+        size_t start = FindFunctionStart(*section, site.base - section->base, 0x4000, &boundaries);
+        size_t last = site.last;
 
         // The function ends at the padding after its last case, or where the next function starts.
         size_t end = last;
@@ -385,7 +417,7 @@ int main(int argc, char* argv[])
 
         if (start == 0)
         {
-            fmt::println("# WARNING: could not find the start of the function containing the jump table at 0x{:X}", table.base);
+            fmt::println("# WARNING: could not find the start of the function containing the jump at 0x{:X}", site.base);
             continue;
         }
 
@@ -395,7 +427,7 @@ int main(int argc, char* argv[])
             extraFunctions.back().size = std::max(extraFunctions.back().size, end - start);
     }
 
-    fmt::println("\n# Functions with jump tables and no .pdata entry. Paste into `functions` in config/bo2_sp.toml.");
+    fmt::println("\n# Functions with jump tables or bdz chains and no .pdata entry. Paste into `functions` in config/bo2_sp.toml.");
     fmt::println("functions = [");
     for (const auto& fn : extraFunctions)
         fmt::println("    {{ address = 0x{:X}, size = 0x{:X} }},", fn.base, fn.size);

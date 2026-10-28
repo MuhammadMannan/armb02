@@ -34,8 +34,8 @@ savevmx_64_address = 0x826EB704
 setjmp_address = 0x826EC320
 longjmp_address = 0x826EC7B0
 
-# Functions that contain jump tables but have no .pdata entry (from `bo2scan`).
-# XenonRecomp's analyser would otherwise end them at the bctr.
+# Functions that contain jump tables or bdz chains but have no .pdata entry (from
+# `bo2scan`). XenonRecomp's analyser would otherwise end them at the bctr or last bdz.
 functions = [
     { address = 0x8210D2E8, size = 0xA8 },
     { address = 0x82176028, size = 0x68 },
@@ -49,6 +49,7 @@ functions = [
     { address = 0x822022E8, size = 0x43C },
     { address = 0x822DECC0, size = 0x1A4 },
     { address = 0x822DEE68, size = 0xFC },
+    { address = 0x82374220, size = 0x64 },
     { address = 0x823941C0, size = 0xD4 },
     { address = 0x823AAD90, size = 0x124 },
     { address = 0x823AEC70, size = 0xA0 },
@@ -63,10 +64,19 @@ functions = [
     { address = 0x8240A0F8, size = 0x40C },
     { address = 0x82422850, size = 0xF8 },
     { address = 0x82424CE8, size = 0x70 },
+    { address = 0x8242F388, size = 0xDC },
     { address = 0x82494878, size = 0x178 },
+    { address = 0x82494D78, size = 0x44 },
+    { address = 0x825054A0, size = 0x8C },
     { address = 0x82557630, size = 0x168 },
     { address = 0x82557D90, size = 0xB2C },
+    { address = 0x82558E68, size = 0x6C },
+    { address = 0x825598F8, size = 0x80 },
     { address = 0x8255AC00, size = 0x130 },
+    { address = 0x82562560, size = 0x5C },
+    { address = 0x826073F8, size = 0x84 },
+    { address = 0x8269CFF8, size = 0x1B4 },
+    { address = 0x826C05B8, size = 0x2C0 },
 ]
 
 # Non-code data between functions (exception tables, padding) to skip.
