@@ -690,6 +690,44 @@ float xmul(float a, float b)
                     }
                     return;
                 }
+                if (op.opcode() == FetchOpcode::kSetTextureGradientsHorz || op.opcode() == FetchOpcode::kSetTextureGradientsVert)
+                {
+                    // armb02: register gradients for a later fetch with UseRegisterGradients; the
+                    // fetches use implicit gradients, so they're not kept.
+                    return;
+                }
+                if (op.opcode() == FetchOpcode::kGetTextureWeights)
+                {
+                    // armb02 (Black Ops II): the bilinear lerp factors, fract(texel - 0.5) at the
+                    // guest size; 2D only (other dimensions give 0), Z and W 0.
+                    if (op.is_predicated())
+                    {
+                        Line(std::format("if (p0 == {}) {{", op.predicate_condition() ? "true" : "false"));
+                        indent++;
+                    }
+                    uint32_t slot = op.fetch_constant_index();
+                    std::string src = Reg(op.src(), op.is_src_relative());
+                    uint32_t sw = op.src_swizzle();
+                    Line("{");
+                    indent++;
+                    std::string value = "vec4(0.0)";
+                    if (op.dimension() == xenos::FetchOpDimension::k2D)
+                    {
+                        std::string uv = std::format("vec2({}.{}, {}.{})", src, kComp[sw & 3], src, kComp[(sw >> 2) & 3]);
+                        std::string texel = op.unnormalized_coordinates() ? uv : std::format("{} * fetchSize2D({}u)", uv, slot);
+                        Line(std::format("vec2 tw = fract({} - 0.5 + vec2({}, {}));", texel, op.offset_x(), op.offset_y()));
+                        value = "vec4(tw, 0.0, 0.0)";
+                    }
+                    StoreFetchResult(op.dest(), op.is_dest_relative(), op.dest_swizzle(), value);
+                    indent--;
+                    Line("}");
+                    if (op.is_predicated())
+                    {
+                        indent--;
+                        Line("}");
+                    }
+                    return;
+                }
                 if (op.opcode() != FetchOpcode::kTextureFetch)
                 {
                     Error(std::format("texture fetch opcode {} not implemented yet", uint32_t(op.opcode())));

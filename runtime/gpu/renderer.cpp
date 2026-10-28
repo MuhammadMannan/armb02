@@ -2802,6 +2802,10 @@ namespace gpu::renderer
         const int64_t s_pipelineWaitUs = [] { const char* v = std::getenv("NFSMW_PIPELINE_WAIT_US"); return v ? int64_t(std::atoll(v)) : 3000; }();
         const bool s_logPipelines = std::getenv("NFSMW_PIPELINE_LOG") != nullptr;
         uint64_t s_frame = 0, s_drawsAtSwap = 0, s_waitPipelinesUntil = 120;  // boot: wait in full
+        // armb02: the full wait after a loading screen also ends 2 s after it in wall-clock time.
+        // Black Ops II's menu needs ~200 new pipelines in one frame (MoltenVK: ~120 ms each,
+        // one at a time in Metal's compiler service), which held a single frame for 25 s.
+        std::chrono::steady_clock::time_point s_waitPipelinesDeadline = std::chrono::steady_clock::time_point::max();
         uint32_t s_pipelineSkips = 0;         // draws skipped this frame, their pipeline not ready
         int64_t s_pipelineWaitLeftUs = 0;     // this frame's wait budget left
 
@@ -2900,8 +2904,18 @@ namespace gpu::renderer
                 // Waits share one budget a frame (cache hits make it); once it
                 // is spent, draws just check. A per-draw wait made a pipeline
                 // used by 13 draws cost 47 ms a frame while it compiled.
-                if (!settings::GetBool(settings::Id::AsyncShaders) || s_frame < s_waitPipelinesUntil)
+                const bool async = settings::GetBool(settings::Id::AsyncShaders);
+                if (!async || (s_waitPipelinesDeadline == std::chrono::steady_clock::time_point::max() && s_frame < s_waitPipelinesUntil))
                     job->cv.wait(lock, [&] { return job->done; });
+                else if (s_frame < s_waitPipelinesUntil && std::chrono::steady_clock::now() < s_waitPipelinesDeadline)
+                {
+                    if (!job->cv.wait_until(lock, s_waitPipelinesDeadline, [&] { return job->done; }))
+                    {
+                        pending = true;
+                        s_pipelineSkips++;
+                        return VK_NULL_HANDLE;
+                    }
+                }
                 else
                 {
                     // The budget catches compiles that finish within a few
@@ -9720,7 +9734,10 @@ void main()
         s_pipelineWaitLeftUs = s_pipelineWaitUs;
         // A loading screen (or movie): wait for pipelines in full for 2 s.
         if (s_stats.draws - s_drawsAtSwap < 64)
+        {
             s_waitPipelinesUntil = frame + 120;
+            s_waitPipelinesDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        }
         s_drawsAtSwap = s_stats.draws;
         if (s_pipelineSkips)
         {
