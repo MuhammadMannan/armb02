@@ -1,0 +1,47 @@
+From da43feaa2bf58ae65fe805c44acad0687d2db557 Mon Sep 17 00:00:00 2001
+From: deadpool-recomp <local@localhost>
+Date: Thu, 15 Oct 2026 13:54:50 -0500
+Subject: [PATCH] XEX loader: allocate the whole image for basic compression
+
+The compressed blocks can end before the image does (Deadpool: blocks cover
+0x1757000 bytes of a 0x1760000-byte image). Allocate security->imageSize,
+zeroed, so readers of image.size bytes (the runtime's copy into guest
+memory) stay inside the buffer.
+---
+ XenonUtils/xex.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/XenonUtils/xex.cpp b/XenonUtils/xex.cpp
+index 4e79042..8dc0b7e 100644
+--- a/XenonUtils/xex.cpp
++++ b/XenonUtils/xex.cpp
+@@ -1,5 +1,6 @@
+ #include "xex.h"
+ #include "image.h"
++#include <algorithm>
+ #include <cassert>
+ #include <cstring>
+ #include <vector>
+@@ -174,13 +175,17 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
+             auto* blocks = reinterpret_cast<const Xex2FileBasicCompressionBlock*>(fileFormatInfo + 1);
+             const size_t numBlocks = (fileFormatInfo->infoSize / sizeof(Xex2FileBasicCompressionInfo)) - 1;
+ 
+-            imageSize = 0;
++            size_t blockBytes = 0;
+             for (size_t i = 0; i < numBlocks; i++)
+             {
+-                imageSize += blocks[i].dataSize + blocks[i].zeroSize;
++                blockBytes += blocks[i].dataSize + blocks[i].zeroSize;
+             }
+ 
++            // The blocks can end before the image does (the tail is zero): allocate the whole
++            // image, zeroed, since callers read image.size = security->imageSize bytes.
++            imageSize = std::max<size_t>(blockBytes, security->imageSize);
+             result = std::make_unique<uint8_t[]>(imageSize);
++            memset(result.get(), 0, imageSize);
+             auto* destData = result.get();
+ 
+             for (size_t i = 0; i < numBlocks; i++)
+-- 
+2.56.0
+

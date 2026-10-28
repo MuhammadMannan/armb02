@@ -1,15 +1,24 @@
-// bo2scan: reads a Xbox 360 XEX (optionally applying a title update .xexp) and
-// prints the values XenonRecomp's TOML config needs that can be found by
-// pattern matching: the register save/restore helpers, longjmp candidates and
-// a count of jump table sites to compare against XenonAnalyse's output.
-// With a title update it also writes the patched XEX, which XenonAnalyse needs.
+// bo2scan: reads the Black Ops II Xbox 360 executable (optionally applying a
+// title update .xexp) and produces what XenonRecomp needs that XenonAnalyse
+// can't find on its own:
+//   - the register save/restore helper addresses
+//   - the setjmp/longjmp addresses
+//   - the jump tables, written as a switch table TOML. BO2's compiler schedules
+//     the table load as lis/rlwinm/addi/lwzx/mtctr/bctr, which XenonAnalyse's
+//     Sonic Unleashed patterns (lis/addi/rlwinm/...) don't match.
+//   - explicit boundaries for functions that contain jump tables or `bdz` chains
+//     (small switches on CTR) but have no .pdata entry. XenonRecomp's analyser
+//     otherwise cuts them short at the bctr or the last bdz.
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
+#include <disasm.h>
 #include <file.h>
 #include <image.h>
 #include <xex_patcher.h>
@@ -20,123 +29,257 @@ namespace
     struct Pattern
     {
         const char* key;
-        std::vector<uint8_t> bytes;
+        std::vector<uint32_t> words;
     };
 
     // Byte patterns from the XenonRecomp README.
-    const Pattern kPatterns[] =
+    const Pattern kHelperPatterns[] =
     {
-        { "restgprlr_14_address", { 0xE9, 0xC1, 0xFF, 0x68 } },
-        { "savegprlr_14_address", { 0xF9, 0xC1, 0xFF, 0x68 } },
-        { "restfpr_14_address",   { 0xC9, 0xCC, 0xFF, 0x70 } },
-        { "savefpr_14_address",   { 0xD9, 0xCC, 0xFF, 0x70 } },
-        { "restvmx_14_address",   { 0x39, 0x60, 0xFE, 0xE0, 0x7D, 0xCB, 0x60, 0xCE } },
-        { "savevmx_14_address",   { 0x39, 0x60, 0xFE, 0xE0, 0x7D, 0xCB, 0x61, 0xCE } },
-        { "restvmx_64_address",   { 0x39, 0x60, 0xFC, 0x00, 0x10, 0x0B, 0x60, 0xCB } },
-        { "savevmx_64_address",   { 0x39, 0x60, 0xFC, 0x00, 0x10, 0x0B, 0x61, 0xCB } },
+        { "restgprlr_14_address", { 0xE9C1FF68 } },
+        { "savegprlr_14_address", { 0xF9C1FF68 } },
+        { "restfpr_14_address",   { 0xC9CCFF70 } },
+        { "savefpr_14_address",   { 0xD9CCFF70 } },
+        { "restvmx_14_address",   { 0x3960FEE0, 0x7DCB60CE } },
+        { "savevmx_14_address",   { 0x3960FEE0, 0x7DCB61CE } },
+        { "restvmx_64_address",   { 0x3960FC00, 0x100B60CB } },
+        { "savevmx_64_address",   { 0x3960FC00, 0x100B61CB } },
     };
 
-    constexpr uint32_t kMtctrR0 = 0x7C0903A6;
-    constexpr uint32_t kMflrR12 = 0x7D8802A6;
+    // setjmp stores f14/f15 into the jmp_buf in r3, longjmp reloads them from r7.
+    const Pattern kJmpPatterns[] =
+    {
+        { "setjmp_address",  { 0xD9C30000, 0xD9E30008 } }, // stfd f14,0(r3); stfd f15,8(r3)
+        { "longjmp_address", { 0xC9C70000, 0xC9E70008 } }, // lfd f14,0(r7); lfd f15,8(r7)
+    };
+
+    const uint32_t kSwitchPattern[] =
+    {
+        PPC_INST_LIS,
+        PPC_INST_RLWINM,
+        PPC_INST_ADDI,
+        PPC_INST_LWZX,
+        PPC_INST_MTCTR,
+        PPC_INST_BCTR,
+    };
+
+    struct SwitchTable
+    {
+        size_t base{};
+        uint32_t r{};
+        size_t defaultLabel{};
+        std::vector<uint32_t> labels;
+    };
+
+    struct FunctionRange
+    {
+        size_t base{};
+        size_t size{};
+    };
 
     uint32_t ReadBE32(const uint8_t* p)
     {
         return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
     }
 
-    // Returns the target of a relative `bl`, or 0 if the instruction is not one.
-    size_t BranchLinkTarget(uint32_t insn, size_t address)
+    std::vector<FunctionRange> ReadPdata(const Image& image)
     {
-        if ((insn >> 26) != 18 || (insn & 3) != 1)
-            return 0;
+        std::vector<FunctionRange> functions;
+        const Section* pdata = image.Find(".pdata");
+        if (pdata == nullptr)
+            return functions;
 
-        int32_t offset = int32_t(insn & 0x03FFFFFC);
-        if (offset & 0x02000000)
-            offset -= 0x04000000;
-
-        return size_t(int64_t(address) + offset);
+        for (size_t offset = 0; offset + 8 <= pdata->size; offset += 8)
+        {
+            uint32_t begin = ReadBE32(pdata->data + offset);
+            uint32_t data = ReadBE32(pdata->data + offset + 4);
+            if (begin != 0)
+                functions.push_back({ begin, ((data >> 8) & 0x3FFFFF) * 4 });
+        }
+        return functions;
     }
 
-    // Walks back to the closest `mflr r12`, the usual start of a non-leaf function.
-    size_t FindPrologue(const Section& section, size_t address)
+    bool MatchWords(const Section& section, size_t offset, const std::vector<uint32_t>& words)
     {
-        for (size_t a = address; a >= section.base && a - section.base < section.size; a -= 4)
+        if (offset + words.size() * 4 > section.size)
+            return false;
+
+        for (size_t i = 0; i < words.size(); i++)
         {
-            if (ReadBE32(section.data + (a - section.base)) == kMflrR12)
-                return a;
+            if (ReadBE32(section.data + offset + i * 4) != words[i])
+                return false;
+        }
+        return true;
+    }
+
+    // Leaf functions like setjmp have no .pdata entry, so walk back to the
+    // zero padding the linker puts between functions, or to a known boundary
+    // (the end of a .pdata function or a `bl` target).
+    size_t FindFunctionStart(const Section& section, size_t offset, size_t limit = 64,
+        const std::set<size_t>* boundaries = nullptr)
+    {
+        for (size_t i = 0; i < limit && offset >= 4; i++)
+        {
+            if (boundaries != nullptr && boundaries->count(section.base + offset))
+                return section.base + offset;
+            if (ReadBE32(section.data + offset - 4) == 0)
+                return section.base + offset;
+            offset -= 4;
         }
         return 0;
+    }
+
+    bool MatchSwitch(const Section& section, size_t offset)
+    {
+        if (offset + std::size(kSwitchPattern) * 4 > section.size)
+            return false;
+
+        ppc_insn insn;
+        for (size_t i = 0; i < std::size(kSwitchPattern); i++)
+        {
+            ppc::Disassemble(section.data + offset + i * 4, section.base + offset + i * 4, insn);
+            if (insn.opcode == nullptr || insn.opcode->id != kSwitchPattern[i])
+                return false;
+        }
+        return true;
+    }
+
+    // Same idea as XenonAnalyse's ScanTable: walk back to the bounds check to
+    // get the index register, the case count and the default label.
+    bool ReadSwitch(const Image& image, const Section& section, size_t offset, SwitchTable& table)
+    {
+        ppc_insn insn;
+        uint32_t cr = UINT32_MAX;
+        size_t count = 0;
+
+        for (size_t i = 1; i <= 32 && i * 4 <= offset; i++)
+        {
+            size_t at = offset - i * 4;
+            ppc::Disassemble(section.data + at, section.base + at, insn);
+            if (insn.opcode == nullptr)
+                continue;
+
+            auto id = insn.opcode->id;
+            if (cr == UINT32_MAX)
+            {
+                if (id == PPC_INST_BGT || id == PPC_INST_BLE || id == PPC_INST_BGTLR || id == PPC_INST_BLELR)
+                {
+                    cr = insn.operands[0];
+                    if (id == PPC_INST_BGT || id == PPC_INST_BLE)
+                        table.defaultLabel = insn.operands[1];
+                }
+            }
+            else if (id == PPC_INST_CMPLWI && insn.operands[0] == cr)
+            {
+                table.r = insn.operands[1];
+                count = size_t(insn.operands[2]) + 1;
+                break;
+            }
+        }
+
+        if (count == 0)
+            return false;
+
+        ppc::Disassemble(section.data + offset, section.base + offset, insn);
+        uint32_t address = insn.operands[1] << 16;
+        ppc::Disassemble(section.data + offset + 8, section.base + offset + 8, insn);
+        address += int16_t(insn.operands[2]);
+
+        auto* entries = static_cast<const uint8_t*>(image.Find(address));
+        if (entries == nullptr)
+            return false;
+
+        table.base = section.base + offset;
+        for (size_t i = 0; i < count; i++)
+            table.labels.push_back(ReadBE32(entries + i * 4));
+        return true;
+    }
+
+    std::string SectionName(const Section& section)
+    {
+        // Section names are 8 bytes and not always NUL-terminated.
+        std::string name;
+        for (char c : section.name.substr(0, 8))
+        {
+            if (c < 0x20 || c > 0x7E)
+                break;
+            name += c;
+        }
+        return name;
     }
 }
 
 int main(int argc, char* argv[])
 {
-    if (argc < 2)
+    std::vector<std::string> positional;
+    std::string patchedPath;
+    std::string switchPath;
+    for (int i = 1; i < argc; i++)
     {
-        fmt::println("Usage: bo2scan <default.xex> [title update .xexp] [patched .xex to write]");
+        std::string arg = argv[i];
+        if (arg == "--patched" && i + 1 < argc)
+            patchedPath = argv[++i];
+        else if (arg == "--switch-tables" && i + 1 < argc)
+            switchPath = argv[++i];
+        else
+            positional.push_back(arg);
+    }
+
+    if (positional.empty())
+    {
+        fmt::println("Usage: bo2scan <default.xex> [title update .xexp] [--patched out.xex] [--switch-tables out.toml]");
         return EXIT_FAILURE;
     }
 
-    std::vector<uint8_t> file = LoadFile(argv[1]);
+    std::vector<uint8_t> file = LoadFile(positional[0]);
     if (file.empty())
     {
-        fmt::println("ERROR: unable to read {}", argv[1]);
+        fmt::println("ERROR: unable to read {}", positional[0]);
         return EXIT_FAILURE;
     }
 
-    if (argc >= 3)
+    if (positional.size() >= 2)
     {
-        std::vector<uint8_t> patch = LoadFile(argv[2]);
+        std::vector<uint8_t> patch = LoadFile(positional[1]);
         std::vector<uint8_t> patched;
         if (patch.empty() ||
             XexPatcher::apply(file.data(), file.size(), patch.data(), patch.size(), patched, false) != XexPatcher::Result::Success)
         {
-            fmt::println("ERROR: unable to apply title update {}", argv[2]);
+            fmt::println("ERROR: unable to apply title update {}", positional[1]);
             return EXIT_FAILURE;
         }
         file = std::move(patched);
 
-        if (argc >= 4)
+        if (!patchedPath.empty())
         {
-            std::ofstream stream(argv[3], std::ios::binary);
+            std::ofstream stream(patchedPath, std::ios::binary);
             stream.write(reinterpret_cast<const char*>(file.data()), file.size());
             if (!stream)
             {
-                fmt::println("ERROR: unable to write {}", argv[3]);
+                fmt::println("ERROR: unable to write {}", patchedPath);
                 return EXIT_FAILURE;
             }
-            fmt::println("# Wrote patched XEX to {}", argv[3]);
+            fmt::println("# Wrote patched XEX to {}", patchedPath);
         }
     }
 
     Image image = Image::ParseImage(file.data(), file.size());
     if (image.data == nullptr)
     {
-        fmt::println("ERROR: {} is not a supported XEX", argv[1]);
+        fmt::println("ERROR: {} is not a supported XEX", positional[0]);
         return EXIT_FAILURE;
     }
 
     fmt::println("# Image base 0x{:X}, size 0x{:X}, entry point 0x{:X}", image.base, image.size, image.entry_point);
     for (const auto& section : image.sections)
     {
-        fmt::println("# Section {:<8} 0x{:08X} - 0x{:08X}{}", section.name, section.base, section.base + section.size,
+        fmt::println("# Section {:<9} 0x{:08X} - 0x{:08X}{}", SectionName(section), section.base, section.base + section.size,
             (section.flags & SectionFlags_Code) ? " (code)" : "");
     }
 
-    size_t rtlUnwind = 0;
-    size_t importCount = 0;
-    for (const auto& symbol : image.symbols)
-    {
-        if (symbol.name.rfind("__imp__", 0) == 0)
-            importCount++;
-        if (symbol.name == "__imp__RtlUnwind")
-            rtlUnwind = symbol.address;
-    }
-    fmt::println("# {} kernel/XAM imports", importCount);
-
-    std::vector<size_t> matches[std::size(kPatterns)];
-    std::vector<size_t> unwindCallers;
-    size_t jumpTableSites = 0;
+    std::vector<size_t> helpers[std::size(kHelperPatterns)];
+    std::vector<size_t> jmps[std::size(kJmpPatterns)];
+    std::vector<SwitchTable> switches;
+    size_t unreadSwitches = 0;
 
     for (const auto& section : image.sections)
     {
@@ -145,53 +288,171 @@ int main(int argc, char* argv[])
 
         for (size_t offset = 0; offset + 4 <= section.size; offset += 4)
         {
-            const uint8_t* p = section.data + offset;
-            size_t address = section.base + offset;
-            uint32_t insn = ReadBE32(p);
-
-            for (size_t i = 0; i < std::size(kPatterns); i++)
+            for (size_t i = 0; i < std::size(kHelperPatterns); i++)
             {
-                const auto& bytes = kPatterns[i].bytes;
-                if (offset + bytes.size() <= section.size && memcmp(p, bytes.data(), bytes.size()) == 0)
-                    matches[i].push_back(address);
+                if (MatchWords(section, offset, kHelperPatterns[i].words))
+                    helpers[i].push_back(section.base + offset);
             }
 
-            if (insn == kMtctrR0)
-                jumpTableSites++;
+            for (size_t i = 0; i < std::size(kJmpPatterns); i++)
+            {
+                if (MatchWords(section, offset, kJmpPatterns[i].words))
+                    jmps[i].push_back(FindFunctionStart(section, offset));
+            }
 
-            if (rtlUnwind != 0 && BranchLinkTarget(insn, address) == rtlUnwind)
-                unwindCallers.push_back(address);
+            if (MatchSwitch(section, offset))
+            {
+                SwitchTable table;
+                if (ReadSwitch(image, section, offset, table))
+                    switches.push_back(std::move(table));
+                else
+                    unreadSwitches++;
+            }
         }
     }
 
     fmt::println("\n# Paste into the [main] table of config/bo2_sp.toml. Check every value in a disassembler first.");
-    for (size_t i = 0; i < std::size(kPatterns); i++)
+    auto printMatches = [](const Pattern& pattern, const std::vector<size_t>& found)
     {
-        const auto& found = matches[i];
         if (found.empty())
+            fmt::println("# {} = NOT FOUND", pattern.key);
+        else
+            fmt::println("{} = 0x{:08X}{}", pattern.key, found.front(),
+                found.size() > 1 ? fmt::format("  # {} matches, first one shown", found.size()) : "");
+    };
+    for (size_t i = 0; i < std::size(kHelperPatterns); i++)
+        printMatches(kHelperPatterns[i], helpers[i]);
+    for (size_t i = 0; i < std::size(kJmpPatterns); i++)
+        printMatches(kJmpPatterns[i], jmps[i]);
+
+    fmt::println("\n# {} jump tables found, {} matched the pattern but had no readable bounds check", switches.size(), unreadSwitches);
+
+    std::vector<FunctionRange> pdata = ReadPdata(image);
+    std::set<size_t> boundaries;
+    for (const auto& fn : pdata)
+    {
+        boundaries.insert(fn.base);
+        boundaries.insert(fn.base + fn.size);
+    }
+    for (const auto& section : image.sections)
+    {
+        if (!(section.flags & SectionFlags_Code))
+            continue;
+        for (size_t offset = 0; offset + 4 <= section.size; offset += 4)
         {
-            fmt::println("# {} = NOT FOUND", kPatterns[i].key);
+            uint32_t insn = ReadBE32(section.data + offset);
+            if ((insn >> 26) == 18 && (insn & 3) == 1)
+            {
+                int32_t delta = int32_t(insn & 0x03FFFFFC);
+                if (delta & 0x02000000)
+                    delta -= 0x04000000;
+                boundaries.insert(size_t(int64_t(section.base + offset) + delta));
+            }
+        }
+    }
+
+    // Every jump table and every forward `bdz` is a site whose targets must stay
+    // inside the function that contains it.
+    struct JumpSite
+    {
+        size_t base{};
+        size_t last{};
+    };
+    std::vector<JumpSite> sites;
+    for (const auto& table : switches)
+    {
+        size_t last = std::max<size_t>(table.base, table.defaultLabel);
+        for (uint32_t label : table.labels)
+            last = std::max<size_t>(last, label);
+        sites.push_back({ table.base, last });
+    }
+    for (const auto& section : image.sections)
+    {
+        if (!(section.flags & SectionFlags_Code))
+            continue;
+        for (size_t offset = 0; offset + 4 <= section.size; offset += 4)
+        {
+            uint32_t insn = ReadBE32(section.data + offset);
+            uint32_t bo = (insn >> 21) & 0x1F;
+            if ((insn >> 26) == 16 && (insn & 3) == 0 && (bo & 0x1E) == 0x12)
+            {
+                int32_t delta = int16_t(insn & 0xFFFC);
+                if (delta > 0)
+                    sites.push_back({ section.base + offset, section.base + offset + delta });
+            }
+        }
+    }
+    std::sort(sites.begin(), sites.end(), [](const JumpSite& a, const JumpSite& b) { return a.base < b.base; });
+
+    std::vector<FunctionRange> extraFunctions;
+    for (const auto& site : sites)
+    {
+        bool covered = false;
+        for (const auto& fn : pdata)
+        {
+            if (site.base >= fn.base && site.base < fn.base + fn.size)
+                covered = true;
+        }
+        if (covered)
+            continue;
+
+        const Section* section = nullptr;
+        for (const auto& s : image.sections)
+        {
+            if (s == site.base)
+                section = &s;
+        }
+
+        size_t start = FindFunctionStart(*section, site.base - section->base, 0x4000, &boundaries);
+        size_t last = site.last;
+
+        // The function ends at the padding after its last case, or where the next function starts.
+        size_t end = last;
+        while (end < section->base + section->size && ReadBE32(section->data + (end - section->base)) != 0)
+        {
+            if (end > last && boundaries.count(end))
+                break;
+            end += 4;
+        }
+
+        if (start == 0)
+        {
+            fmt::println("# WARNING: could not find the start of the function containing the jump at 0x{:X}", site.base);
             continue;
         }
 
-        fmt::println("{} = 0x{:08X}{}", kPatterns[i].key, found.front(),
-            found.size() > 1 ? fmt::format("  # {} matches, first one shown", found.size()) : "");
+        if (extraFunctions.empty() || extraFunctions.back().base != start)
+            extraFunctions.push_back({ start, end - start });
+        else
+            extraFunctions.back().size = std::max(extraFunctions.back().size, end - start);
     }
 
-    fmt::println("\n# longjmp usually calls RtlUnwind; setjmp is usually right after longjmp.");
-    if (rtlUnwind == 0)
-        fmt::println("# RtlUnwind is not imported");
-    for (size_t caller : unwindCallers)
+    fmt::println("\n# Functions with jump tables or bdz chains and no .pdata entry. Paste into `functions` in config/bo2_sp.toml.");
+    fmt::println("functions = [");
+    for (const auto& fn : extraFunctions)
+        fmt::println("    {{ address = 0x{:X}, size = 0x{:X} }},", fn.base, fn.size);
+    fmt::println("]");
+
+    if (!switchPath.empty())
     {
-        size_t start = 0;
-        for (const auto& section : image.sections)
+        std::string out = "# Generated by bo2scan\n";
+        for (const auto& table : switches)
         {
-            if (section == caller)
-                start = FindPrologue(section, caller);
+            out += fmt::format("[[switch]]\nbase = 0x{:X}\nr = {}\ndefault = 0x{:X}\nlabels = [\n", table.base, table.r, table.defaultLabel);
+            for (uint32_t label : table.labels)
+                out += fmt::format("    0x{:X},\n", label);
+            out += "]\n\n";
         }
-        fmt::println("# RtlUnwind called at 0x{:08X}, enclosing function probably starts near 0x{:08X}", caller, start);
+
+        std::ofstream stream(switchPath);
+        stream << out;
+        if (!stream)
+        {
+            fmt::println("ERROR: unable to write {}", switchPath);
+            return EXIT_FAILURE;
+        }
+        fmt::println("# Wrote switch tables to {}", switchPath);
     }
 
-    fmt::println("\n# {} `mtctr r0` sites (possible jump tables). Compare with the XenonAnalyse output.", jumpTableSites);
     return EXIT_SUCCESS;
 }
