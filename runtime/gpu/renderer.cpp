@@ -4749,6 +4749,7 @@ vec4 px(uint x, uint y)
 }
 
 uint unorm(float v, float m) { return uint(clamp(v, 0.0, 1.0) * m + 0.5); }
+uint packFixed16(vec2 c) { ivec2 i = ivec2(round(clamp(c, -32768.0, 65535.0))); return (uint(i.x) & 0xFFFFu) | ((uint(i.y) & 0xFFFFu) << 16); }
 )" GLSL_DEPTH24_PACK R"(
 uint pack32(vec4 c)
 {
@@ -4864,7 +4865,10 @@ void main()
     {
         vec4 c = px(gx, gy);
         uint w0, w1;
-        if (p.format == 26u) { w0 = packSnorm2x16(c.rg); w1 = packSnorm2x16(c.ba); }
+        // armb02: a resolve to k_16_16_16_16 with an exponent bias stores fixed-point
+        // integers (BO2's colour-grading pass: float * 2^11, sampled as integers * 2^-11).
+        if (p.format == 26u && p.expScale != 1.0) { w0 = packFixed16(c.rg); w1 = packFixed16(c.ba); }
+        else if (p.format == 26u) { w0 = packSnorm2x16(c.rg); w1 = packSnorm2x16(c.ba); }
         else if (p.format == 32u) { w0 = packHalf2x16(c.rg); w1 = packHalf2x16(c.ba); }
         else { w0 = floatBitsToUint(c.r); w1 = floatBitsToUint(c.g); }
         if (p.endian == 4u) { uint t = w0; w0 = swapWord(w1, 2u); w1 = swapWord(t, 2u); }

@@ -95,6 +95,14 @@ vec4 fetchSigns(vec4 v, uint slot)
             if (((signs >> (2 * i)) & 3u) == 3u)
                 v[i] = xeGammaToLinear(v[i]);
     }
+    // armb02: an integer number format (word 3 bit 0) samples the stored integers, not
+    // [0, 1]: the 16-bit fixed formats come back from their UNORM views scaled up.
+    if ((fetchDword(slot, 3u) & 1u) != 0u)
+    {
+        uint format = fetchDword(slot, 1u) & 0x3Fu;
+        if (format == 24u || format == 25u || format == 26u)
+            v *= 65535.0;
+    }
     int expAdjust = bitfieldExtract(int(fetchDword(slot, 3u)), 13, 6);
     if (expAdjust != 0)
         v *= exp2(float(expAdjust));
