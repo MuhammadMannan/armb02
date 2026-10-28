@@ -304,3 +304,28 @@ PPC_FUNC(sub_82498858)
     }
     __imp__sub_82498858(ctx, base);
 }
+
+// ARMB02_LOG_JOBS=1: BO2's job submissions (Job_Add, 823C9F78), by job type name (the descriptor's
+// first word points at the type, whose first word is its name and third its entry), at the 1st,
+// 10th, 100th, 1000th and 10000th submission of each.
+PPC_FUNC_IMPL(__imp__sub_823C9F78);
+PPC_FUNC(sub_823C9F78)
+{
+    static const bool on = [] { const char* v = std::getenv("ARMB02_LOG_JOBS"); return v && v[0] == '1'; }();
+    if (on)
+    {
+        static std::mutex mutex;
+        static std::unordered_map<uint32_t, uint32_t> counts;
+        uint32_t def = ctx.r3.u32, type = Word(base, def), namePtr = type ? Word(base, type) : 0;
+        std::string name;
+        GuestString(base, namePtr, name, 64);
+        std::lock_guard lock(mutex);
+        uint32_t n = ++counts[def];
+        if (n == 1 || n == 10 || n == 100 || n == 1000 || n == 10000)
+            fprintf(stderr, "[jobs] submit #%u def %08X type %08X \"%s\" entry %08X words %08X %08X %08X %08X %08X r5 %08X t%u lr %08X\n", n, def, type,
+                name.c_str(), type ? Word(base, type + 8) : 0, Word(base, def + 4), Word(base, def + 8), Word(base, def + 12), Word(base, def + 16),
+                Word(base, def + 20), ctx.r5.u32, GuestThread::GetCurrentThreadId(), uint32_t(ctx.lr));
+    }
+    __imp__sub_823C9F78(ctx, base);
+}
+
