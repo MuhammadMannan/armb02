@@ -125,6 +125,18 @@ namespace
     {
         if (app == 0xFA)
             return XmpDispatch(message, buffer, length);
+        // armb02: what Black Ops II sends at start-up, answered as Xenia does (offline).
+        if (app == 0xFB && (message == 0x000B0006 || message == 0x000B0007))
+            return X_E_SUCCESS;  // XUserSetContextEx, XUserSetPropertyEx: nothing to record
+        if (app == 0xFC && message == 0x00058004)
+        {
+            // XLiveBase logon id at start-up: a flag in a 4-byte buffer
+            if (buffer != 0 && length >= 4)
+                *Guest<be<uint32_t>>(buffer) = 1;
+            return X_E_SUCCESS;
+        }
+        if (app == 0xFC && message == 0x00058046)
+            return X_E_SUCCESS;
         if (app == 0xFB || app == 0xFC)
         {
             fprintf(stderr, "[xmsg] app %02X message %08X not implemented (returning X_E_FAIL)\n", app, message);
