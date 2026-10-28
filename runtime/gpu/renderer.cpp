@@ -3984,16 +3984,24 @@ void main()
             TextureFormatInfo fi;
             uint32_t format = uint32_t(f.format);
             {
-                // ARMB02_LOG_TEXFORMATS=1: each distinct (format, signs, exp adjust, swizzle) sampled.
+                // ARMB02_LOG_TEXFORMATS=1: each distinct (format, signs, exp adjust, swizzle, number
+                // format) sampled, and each distinct texture fetched with an integer number format
+                // (word 3 bit 0; the swizzle is bits 1-12) with the pixel shader that fetches it.
                 static const bool logFormats = [] { const char* v = std::getenv("ARMB02_LOG_TEXFORMATS"); return v && v[0] == '1'; }();
                 if (logFormats)
                 {
                     const uint32_t* raw = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6];
-                    uint32_t signs = (raw[0] >> 2) & 0xFF, expAdjust = (raw[3] >> 13) & 0x3F, swz = raw[3] & 0xFFF;
-                    LogOnce((0x7E5ull << 48) | (uint64_t(format) << 32) | (signs << 24) | (expAdjust << 16) | swz,
-                        "texture format %u signs %u%u%u%u exp %d swizzle %03X dim %u (first at %08X, %ux%u)", format, signs & 3,
-                        (signs >> 2) & 3, (signs >> 4) & 3, (signs >> 6) & 3, int32_t(expAdjust << 26) >> 26, swz,
+                    uint32_t signs = (raw[0] >> 2) & 0xFF, expAdjust = (raw[3] >> 13) & 0x3F, swz = (raw[3] >> 1) & 0xFFF, numFormat = raw[3] & 1;
+                    LogOnce((0x7E5ull << 48) | (uint64_t(format) << 32) | (uint64_t(numFormat) << 31) | (signs << 23) | (expAdjust << 16) | swz,
+                        "texture format %u signs %u%u%u%u exp %d swizzle %03X num_format %u dim %u (first at %08X, %ux%u)", format, signs & 3,
+                        (signs >> 2) & 3, (signs >> 4) & 3, (signs >> 6) & 3, int32_t(expAdjust << 26) >> 26, swz, numFormat,
                         uint32_t(f.dimension), (f.base_address << 12), f.size_2d.width + 1, f.size_2d.height + 1);
+                    if (numFormat && s_ps)
+                        LogOnce((0x1E7ull << 52) ^ (uint64_t(f.base_address) << 20) ^ (uint64_t(format) << 14) ^ (expAdjust << 8) ^ s_ps->hash,
+                            "integer fetch: format %u signs %u%u%u%u exp %d swizzle %03X dim %u base %08X %ux%u slot %u ps_%016llx fetch %08X %08X %08X %08X %08X %08X",
+                            format, signs & 3, (signs >> 2) & 3, (signs >> 4) & 3, (signs >> 6) & 3, int32_t(expAdjust << 26) >> 26, swz,
+                            uint32_t(f.dimension), (f.base_address << 12), f.size_2d.width + 1, f.size_2d.height + 1, slot,
+                            (unsigned long long)s_ps->hash, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
                 }
             }
             if (!GetTextureFormat(format, fi))
