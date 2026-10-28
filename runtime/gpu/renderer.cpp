@@ -3983,6 +3983,19 @@ void main()
             uint32_t layers = cube ? 6 : 1;
             TextureFormatInfo fi;
             uint32_t format = uint32_t(f.format);
+            {
+                // ARMB02_LOG_TEXFORMATS=1: each distinct (format, signs, exp adjust, swizzle) sampled.
+                static const bool logFormats = [] { const char* v = std::getenv("ARMB02_LOG_TEXFORMATS"); return v && v[0] == '1'; }();
+                if (logFormats)
+                {
+                    const uint32_t* raw = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6];
+                    uint32_t signs = (raw[0] >> 2) & 0xFF, expAdjust = (raw[3] >> 13) & 0x3F, swz = raw[3] & 0xFFF;
+                    LogOnce((0x7E5ull << 48) | (uint64_t(format) << 32) | (signs << 24) | (expAdjust << 16) | swz,
+                        "texture format %u signs %u%u%u%u exp %d swizzle %03X dim %u (first at %08X, %ux%u)", format, signs & 3,
+                        (signs >> 2) & 3, (signs >> 4) & 3, (signs >> 6) & 3, int32_t(expAdjust << 26) >> 26, swz,
+                        uint32_t(f.dimension), (f.base_address << 12), f.size_2d.width + 1, f.size_2d.height + 1);
+                }
+            }
             if (!GetTextureFormat(format, fi))
             {
                 LogOnce(0x3000 + format, "texture format %u not implemented", format);
