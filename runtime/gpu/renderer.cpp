@@ -4043,7 +4043,11 @@ void main()
             }
             else
             {
-                rowBytes = ((pitchBlocks << fi.bpbLog2) + 255) & ~255u;
+                // armb02: a linear texture's rows are the fetch constant's pitch (32-texel units)
+                // apart, unpadded: BO2's movie frames (k_8, 1920x720, pitch 1920) are written
+                // 1920 bytes a row, which the 256-byte rounding read as 2048 (green stripes).
+                // With no pitch given, rows are the width rounded to 256 bytes as before.
+                rowBytes = f.pitch ? pitchBlocks << fi.bpbLog2 : ((pitchBlocks << fi.bpbLog2) + 255) & ~255u;
                 size = rowBytes * (bh + offY);
             }
             // Faces after the first follow at the 4 KB-aligned slice stride.
