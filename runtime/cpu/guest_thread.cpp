@@ -69,6 +69,8 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
     *(uint32_t*)thread = ByteSwap(g_memory.MapVirtual(thread + PCR_SIZE)); // tls pointer
     *(uint32_t*)(thread + 0x100) = ByteSwap(g_memory.MapVirtual(thread + PCR_SIZE + TLS_SIZE)); // teb pointer
     *(thread + 0x10C) = cpuNumber;
+    if (auto* hThread = dynamic_cast<GuestThreadHandle*>(t_self))
+        hThread->pcr = g_memory.MapVirtual(thread);
 
     if (!s_tlsTemplate.empty())
         memcpy(thread + PCR_SIZE, s_tlsTemplate.data(), s_tlsTemplate.size());
@@ -87,6 +89,8 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
 
 GuestThreadContext::~GuestThreadContext()
 {
+    if (auto* hThread = dynamic_cast<GuestThreadHandle*>(t_self))
+        hThread->pcr = 0;
     report::SetThreadGuestContext(nullptr);
     g_userHeap.Free(thread);
 }

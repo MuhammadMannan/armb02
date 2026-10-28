@@ -45,6 +45,9 @@ struct GuestThreadHandle : Waitable
     uint32_t id;
     std::atomic<bool> suspended;
     bool finished = false;  // SpeedBreaker: guarded by dispatcher::Lock()
+    // armb02: the guest address of the thread's PCR while it runs (0 before and after), so
+    // KeSetAffinityThread can set another thread's processor number (PCR+0x10C).
+    std::atomic<uint32_t> pcr{ 0 };
 #ifdef USE_PTHREAD
     pthread_t thread;
 #else

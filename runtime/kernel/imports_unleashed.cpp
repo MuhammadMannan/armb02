@@ -265,10 +265,37 @@ uint32_t NtSuspendThread(GuestThreadHandle* hThread, uint32_t* suspendCount)
     return S_OK;
 }
 
+// armb02: the game reads its processor number from the PCR (+0x10C, KeGetCurrentProcessorNumber),
+// and BO2's job system runs some jobs only on one processor (the WebM decoder's on processor 2),
+// so the affinity a thread is given becomes its processor number: in its PCR once it runs, in its
+// creation flags (which GuestThread::Start turns into the PCR's) while it waits to start.
 uint32_t KeSetAffinityThread(uint32_t Thread, uint32_t Affinity, be<uint32_t>* lpPreviousAffinity)
 {
+    const uint8_t cpu = Affinity == 0 ? 0 : std::countr_zero(Affinity) & 7;
+    uint8_t* pcr = nullptr;
+    GuestThreadHandle* hThread = nullptr;
+
+    KernelObject* object = Thread == CURRENT_THREAD_HANDLE ? nullptr : GetKernelObject(Thread);
+    if (Thread == CURRENT_THREAD_HANDLE || object == GuestThread::GetCurrentThreadObject())
+        pcr = static_cast<uint8_t*>(g_memory.Translate(g_ppcContext->r13.u32));
+    else if ((hThread = dynamic_cast<GuestThreadHandle*>(object)) && hThread->pcr != 0)
+        pcr = static_cast<uint8_t*>(g_memory.Translate(hThread->pcr));
+
+    uint32_t previous = 1;
+    if (pcr)
+    {
+        previous = 1u << pcr[0x10C];
+        pcr[0x10C] = cpu;
+    }
+    else if (hThread)
+    {
+        const uint8_t mask = uint8_t(hThread->params.flags >> 24);
+        previous = mask ? mask : 1;
+        hThread->params.flags = (hThread->params.flags & 0x00FFFFFF) | ((1u << cpu) << 24);
+    }
+
     if (lpPreviousAffinity)
-        *lpPreviousAffinity = 2;
+        *lpPreviousAffinity = previous;
 
     return 0;
 }
