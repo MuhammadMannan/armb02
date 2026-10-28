@@ -184,21 +184,99 @@ uint32_t NetDll_XNetGetTitleXnAddr(uint32_t caller, uint8_t* addr)
     return 0x00000002 | 0x00000004 | 0x00000020 | 0x00000040;  // XNET_GET_XNADDR_ETHERNET | STATIC | GATEWAY | DNS
 }
 
-uint32_t NetDll_socket(uint32_t caller, uint32_t af, uint32_t type, uint32_t protocol) { return NetFail(); }
-uint32_t NetDll_closesocket(uint32_t caller, uint32_t s) { return NetFail(); }
-uint32_t NetDll_bind(uint32_t caller, uint32_t s, uint32_t name, uint32_t len) { return NetFail(); }
-uint32_t NetDll_connect(uint32_t caller, uint32_t s, uint32_t name, uint32_t len) { return NetFail(); }
-uint32_t NetDll_listen(uint32_t caller, uint32_t s, uint32_t backlog) { return NetFail(); }
-uint32_t NetDll_accept(uint32_t caller, uint32_t s, uint32_t addr, uint32_t len) { return NetFail(); }
-uint32_t NetDll_select(uint32_t caller, uint32_t n, uint32_t r, uint32_t w, uint32_t e, uint32_t t) { return NetFail(); }
-uint32_t NetDll_recv(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags) { return NetFail(); }
-uint32_t NetDll_recvfrom(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags, uint32_t from) { return NetFail(); }
-uint32_t NetDll_send(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags) { return NetFail(); }
-uint32_t NetDll_sendto(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags, uint32_t to) { return NetFail(); }
-uint32_t NetDll_setsockopt(uint32_t caller, uint32_t s, uint32_t level, uint32_t name, uint32_t val, uint32_t len) { return NetFail(); }
-uint32_t NetDll_getsockopt(uint32_t caller, uint32_t s, uint32_t level, uint32_t name, uint32_t val, uint32_t len) { return NetFail(); }
-uint32_t NetDll_getsockname(uint32_t caller, uint32_t s, uint32_t name, uint32_t len) { return NetFail(); }
-uint32_t NetDll_ioctlsocket(uint32_t caller, uint32_t s, uint32_t cmd, uint32_t arg) { return NetFail(); }
+// armb02: Black Ops II opens and binds its game port at start-up and stops ("Couldn't allocate
+// IP port") if it can't. Sockets are therefore offline stand-ins: creating, binding, options and
+// closing succeed, sends are dropped, nothing ever arrives (WSAEWOULDBLOCK, select finds none),
+// and connecting or listening fails as with no network.
+namespace
+{
+    constexpr uint32_t WSAEWOULDBLOCK = 10035;
+    constexpr uint32_t WSAENOTSOCK = 10038;
+    constexpr uint32_t WSAENETUNREACH = 10051;
+
+    std::mutex s_socketMutex;
+    std::unordered_map<uint32_t, uint16_t> s_sockets;  // handle -> bound port (host order)
+    uint32_t s_nextSocket = 0x100;
+
+    bool IsSocket(uint32_t s)
+    {
+        std::lock_guard lock(s_socketMutex);
+        return s_sockets.count(s) != 0;
+    }
+
+    uint32_t SocketFail(uint32_t error)
+    {
+        t_wsaLastError = error;
+        return SOCKET_ERROR;
+    }
+}
+
+uint32_t NetDll_socket(uint32_t caller, uint32_t af, uint32_t type, uint32_t protocol)
+{
+    std::lock_guard lock(s_socketMutex);
+    uint32_t s = s_nextSocket++;
+    s_sockets[s] = 0;
+    return s;
+}
+
+uint32_t NetDll_closesocket(uint32_t caller, uint32_t s)
+{
+    std::lock_guard lock(s_socketMutex);
+    return s_sockets.erase(s) != 0 ? 0 : SocketFail(WSAENOTSOCK);
+}
+
+uint32_t NetDll_bind(uint32_t caller, uint32_t s, uint8_t* name, uint32_t len)
+{
+    std::lock_guard lock(s_socketMutex);
+    auto it = s_sockets.find(s);
+    if (it == s_sockets.end())
+        return SocketFail(WSAENOTSOCK);
+    it->second = (name != nullptr && len >= 4) ? uint16_t(*reinterpret_cast<be<uint16_t>*>(name + 2)) : 0;
+    return 0;
+}
+
+uint32_t NetDll_getsockname(uint32_t caller, uint32_t s, uint8_t* name, be<uint32_t>* len)
+{
+    std::lock_guard lock(s_socketMutex);
+    auto it = s_sockets.find(s);
+    if (it == s_sockets.end())
+        return SocketFail(WSAENOTSOCK);
+    if (name != nullptr && len != nullptr && *len >= 16)
+    {
+        memset(name, 0, 16);
+        *reinterpret_cast<be<uint16_t>*>(name + 0) = 2;  // AF_INET
+        *reinterpret_cast<be<uint16_t>*>(name + 2) = it->second;
+        *reinterpret_cast<be<uint32_t>*>(name + 4) = 0x7F000001;
+        *len = 16;
+    }
+    return 0;
+}
+
+uint32_t NetDll_connect(uint32_t caller, uint32_t s, uint32_t name, uint32_t len) { return SocketFail(IsSocket(s) ? WSAENETUNREACH : WSAENOTSOCK); }
+uint32_t NetDll_listen(uint32_t caller, uint32_t s, uint32_t backlog) { return SocketFail(IsSocket(s) ? WSAENETDOWN : WSAENOTSOCK); }
+uint32_t NetDll_accept(uint32_t caller, uint32_t s, uint32_t addr, uint32_t len) { return SocketFail(IsSocket(s) ? WSAEWOULDBLOCK : WSAENOTSOCK); }
+uint32_t NetDll_select(uint32_t caller, uint32_t n, uint8_t* r, uint8_t* w, uint8_t* e, uint32_t t)
+{
+    // fd_set: a count, then the sockets; none are ever ready.
+    for (uint8_t* set : { r, w, e })
+        if (set != nullptr)
+            *reinterpret_cast<be<uint32_t>*>(set) = 0;
+    return 0;
+}
+uint32_t NetDll_recv(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags) { return SocketFail(IsSocket(s) ? WSAEWOULDBLOCK : WSAENOTSOCK); }
+uint32_t NetDll_recvfrom(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags, uint32_t from) { return SocketFail(IsSocket(s) ? WSAEWOULDBLOCK : WSAENOTSOCK); }
+uint32_t NetDll_send(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags) { return IsSocket(s) ? len : SocketFail(WSAENOTSOCK); }
+uint32_t NetDll_sendto(uint32_t caller, uint32_t s, uint32_t buf, uint32_t len, uint32_t flags, uint32_t to) { return IsSocket(s) ? len : SocketFail(WSAENOTSOCK); }
+uint32_t NetDll_setsockopt(uint32_t caller, uint32_t s, uint32_t level, uint32_t name, uint32_t val, uint32_t len) { return IsSocket(s) ? 0 : SocketFail(WSAENOTSOCK); }
+uint32_t NetDll_getsockopt(uint32_t caller, uint32_t s, uint32_t level, uint32_t name, uint32_t val, uint32_t len) { return SocketFail(IsSocket(s) ? WSAENETDOWN : WSAENOTSOCK); }
+uint32_t NetDll_ioctlsocket(uint32_t caller, uint32_t s, uint32_t cmd, be<uint32_t>* arg)
+{
+    if (!IsSocket(s))
+        return SocketFail(WSAENOTSOCK);
+    if (cmd == 0x4004667F && arg != nullptr)  // FIONREAD: nothing waiting
+        *arg = 0;
+    return 0;
+}
 uint32_t NetDll_inet_addr(uint32_t cp) { return 0xFFFFFFFF; }  // INADDR_NONE
 
 // XNet address/QoS/DNS services: unavailable without a network.
