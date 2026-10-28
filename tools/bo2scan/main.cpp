@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -52,15 +53,7 @@ namespace
         { "longjmp_address", { 0xC9C70000, 0xC9E70008 } }, // lfd f14,0(r7); lfd f15,8(r7)
     };
 
-    const uint32_t kSwitchPattern[] =
-    {
-        PPC_INST_LIS,
-        PPC_INST_RLWINM,
-        PPC_INST_ADDI,
-        PPC_INST_LWZX,
-        PPC_INST_MTCTR,
-        PPC_INST_BCTR,
-    };
+    constexpr uint32_t kBctr = 0x4E800420;
 
     struct SwitchTable
     {
@@ -128,32 +121,120 @@ namespace
         return 0;
     }
 
-    bool MatchSwitch(const Section& section, size_t offset)
+    // A jump table ends in `mtctr; bctr`. Black Ops II's compiler orders and pads the address
+    // arithmetic in several ways (lis/rlwinm/addi/lwzx; lis/addi/rlwinm/lhzx/lis/addi/nop/add; ...),
+    // so rather than match fixed patterns, evaluate the straight-line code before the bctr:
+    //   absolute: the target is loaded with lwzx from a known table address;
+    //   offset:   a byte or halfword is loaded with lbzx/lhzx, optionally shifted with rlwinm,
+    //             and added to a known code address.
+    // Then, like XenonAnalyse's ScanTable, walk back to the bounds check for the index register,
+    // the case count and the default label. Returns false if the bctr isn't a recognisable table.
+    bool ReadSwitch(const Image& image, const Section& section, size_t bctr, SwitchTable& table, bool& isTable)
     {
-        if (offset + std::size(kSwitchPattern) * 4 > section.size)
-            return false;
-
+        isTable = false;
         ppc_insn insn;
-        for (size_t i = 0; i < std::size(kSwitchPattern); i++)
+
+        // The straight-line block before the bctr: back to the nearest branch, at most 16 instructions.
+        size_t first = bctr;
+        while (first >= 4 && bctr - first < 16 * 4)
         {
-            ppc::Disassemble(section.data + offset + i * 4, section.base + offset + i * 4, insn);
-            if (insn.opcode == nullptr || insn.opcode->id != kSwitchPattern[i])
-                return false;
+            uint32_t op = ReadBE32(section.data + first - 4) >> 26;
+            if (op == 16 || op == 18 || op == 19)
+                break;
+            first -= 4;
         }
-        return true;
-    }
 
-    // Same idea as XenonAnalyse's ScanTable: walk back to the bounds check to
-    // get the index register, the case count and the default label.
-    bool ReadSwitch(const Image& image, const Section& section, size_t offset, SwitchTable& table)
-    {
-        ppc_insn insn;
+        std::map<uint32_t, uint32_t> known;  // registers holding a known address
+        uint32_t tableAddress = 0, loadSize = 0, scaled = UINT32_MAX, shift = 0, sum = UINT32_MAX, codeBase = 0, ctr = UINT32_MAX;
+        size_t tableLis = 0;
+        std::map<uint32_t, size_t> lisAt;
+        std::map<uint32_t, uint32_t> scaledFrom;  // rlwinm rD,rS,2,0,29 before the load: rD -> rS
+        uint32_t index = UINT32_MAX;              // the register the table load is indexed by
+        for (size_t at = first; at < bctr; at += 4)
+        {
+            ppc::Disassemble(section.data + at, section.base + at, insn);
+            if (insn.opcode == nullptr)
+                return false;
+            const uint32_t* o = insn.operands;
+            switch (insn.opcode->id)
+            {
+            case PPC_INST_NOP:
+                break;
+            case PPC_INST_LIS:
+                known[o[0]] = o[1] << 16;
+                lisAt[o[0]] = section.base + at;
+                break;
+            case PPC_INST_ADDI:
+                if (known.count(o[1]))
+                {
+                    known[o[0]] = known[o[1]] + int16_t(o[2]);
+                    lisAt[o[0]] = lisAt[o[1]];
+                }
+                else
+                    known.erase(o[0]);
+                break;
+            case PPC_INST_LWZX:
+            case PPC_INST_LHZX:
+            case PPC_INST_LBZX:
+            {
+                uint32_t reg = known.count(o[1]) ? o[1] : known.count(o[2]) ? o[2] : UINT32_MAX;
+                if (reg == UINT32_MAX)
+                    return false;
+                uint32_t offsetReg = reg == o[1] ? o[2] : o[1];
+                index = scaledFrom.count(offsetReg) ? scaledFrom[offsetReg] : offsetReg;
+                tableAddress = known[reg];
+                tableLis = lisAt[reg];
+                loadSize = insn.opcode->id == PPC_INST_LWZX ? 4 : insn.opcode->id == PPC_INST_LHZX ? 2 : 1;
+                known.erase(o[0]);
+                scaled = o[0];
+                break;
+            }
+            case PPC_INST_RLWINM:
+                if (o[1] == scaled && loadSize != 0)
+                {
+                    shift = o[2];
+                    scaled = o[0];
+                }
+                else
+                {
+                    known.erase(o[0]);
+                    if (loadSize == 0 && o[2] == 2 && o[3] == 0 && o[4] == 29)
+                        scaledFrom[o[0]] = o[1];
+                }
+                break;
+            case PPC_INST_ADD:
+                if (o[1] == scaled && known.count(o[2]))
+                    codeBase = known[o[2]];
+                else if (o[2] == scaled && known.count(o[1]))
+                    codeBase = known[o[1]];
+                else
+                {
+                    known.erase(o[0]);
+                    break;
+                }
+                sum = o[0];
+                break;
+            case PPC_INST_MTCTR:
+                ctr = o[0];
+                break;
+            default:
+                if (insn.opcode->operands[0] != 0)  // most instructions write their first operand
+                    known.erase(o[0]);
+                break;
+            }
+        }
+
+        bool absolute = loadSize == 4 && ctr == scaled && shift == 0;
+        bool offset = loadSize != 0 && loadSize < 4 && ctr == sum;
+        if (!absolute && !offset)
+            return false;
+        isTable = true;
+
         uint32_t cr = UINT32_MAX;
         size_t count = 0;
-
-        for (size_t i = 1; i <= 32 && i * 4 <= offset; i++)
+        for (size_t i = 1; i <= 40 && i * 4 <= bctr; i++)
         {
-            size_t at = offset - i * 4;
+            size_t at = bctr - i * 4;
             ppc::Disassemble(section.data + at, section.base + at, insn);
             if (insn.opcode == nullptr)
                 continue;
@@ -176,21 +257,49 @@ namespace
             }
         }
 
-        if (count == 0)
-            return false;
-
-        ppc::Disassemble(section.data + offset, section.base + offset, insn);
-        uint32_t address = insn.operands[1] << 16;
-        ppc::Disassemble(section.data + offset + 8, section.base + offset + 8, insn);
-        address += int16_t(insn.operands[2]);
-
-        auto* entries = static_cast<const uint8_t*>(image.Find(address));
+        auto* entries = static_cast<const uint8_t*>(image.Find(tableAddress));
         if (entries == nullptr)
             return false;
 
-        table.base = section.base + offset;
+        // No bounds check in reach (zlib's inflate checks its mode elsewhere): an absolute table
+        // that the code right after it is the lowest target of, as compilers lay them out, ends
+        // where that code starts.
+        if (count == 0 && absolute && index != UINT32_MAX)
+        {
+            uint32_t lowest = UINT32_MAX;
+            for (size_t i = 0; i < 1024; i++)
+            {
+                uint32_t at = tableAddress + uint32_t(i * 4);
+                if (at == lowest)
+                {
+                    count = i;
+                    break;
+                }
+                uint32_t label = ReadBE32(entries + i * 4);
+                if (label <= tableAddress || label < section.base || label >= section.base + section.size || (label & 3))
+                    break;
+                lowest = std::min(lowest, label);
+            }
+            if (count == 0)
+                return false;
+            table.r = index;
+            table.defaultLabel = ReadBE32(entries);
+        }
+
+        if (count == 0)
+            return false;
+
+        // Keyed at the lis of the table address, as XenonAnalyse does; no other bctr lies between it and ours.
+        table.base = tableLis;
         for (size_t i = 0; i < count; i++)
-            table.labels.push_back(ReadBE32(entries + i * 4));
+        {
+            if (absolute)
+                table.labels.push_back(ReadBE32(entries + i * 4));
+            else if (loadSize == 2)
+                table.labels.push_back(codeBase + ((uint32_t(entries[i * 2]) << 8 | entries[i * 2 + 1]) << shift));
+            else
+                table.labels.push_back(codeBase + (uint32_t(entries[i]) << shift));
+        }
         return true;
     }
 
@@ -213,6 +322,7 @@ int main(int argc, char* argv[])
     std::vector<std::string> positional;
     std::string patchedPath;
     std::string switchPath;
+    std::string imagePath;
     for (int i = 1; i < argc; i++)
     {
         std::string arg = argv[i];
@@ -220,13 +330,15 @@ int main(int argc, char* argv[])
             patchedPath = argv[++i];
         else if (arg == "--switch-tables" && i + 1 < argc)
             switchPath = argv[++i];
+        else if (arg == "--image" && i + 1 < argc)
+            imagePath = argv[++i];
         else
             positional.push_back(arg);
     }
 
     if (positional.empty())
     {
-        fmt::println("Usage: bo2scan <default.xex> [title update .xexp] [--patched out.xex] [--switch-tables out.toml]");
+        fmt::println("Usage: bo2scan <default.xex> [title update .xexp] [--patched out.xex] [--switch-tables out.toml] [--image out.bin]");
         return EXIT_FAILURE;
     }
 
@@ -270,6 +382,18 @@ int main(int argc, char* argv[])
     }
 
     fmt::println("# Image base 0x{:X}, size 0x{:X}, entry point 0x{:X}", image.base, image.size, image.entry_point);
+    if (!imagePath.empty())
+    {
+        // The loaded image as the game sees it in memory, for scripts/find_entry_points.py.
+        std::ofstream stream(imagePath, std::ios::binary);
+        stream.write(reinterpret_cast<const char*>(image.data.get()), image.size);
+        if (!stream)
+        {
+            fmt::println("ERROR: unable to write {}", imagePath);
+            return EXIT_FAILURE;
+        }
+        fmt::println("# Wrote the loaded image to {}", imagePath);
+    }
     for (const auto& section : image.sections)
     {
         fmt::println("# Section {:<9} 0x{:08X} - 0x{:08X}{}", SectionName(section), section.base, section.base + section.size,
@@ -300,13 +424,17 @@ int main(int argc, char* argv[])
                     jmps[i].push_back(FindFunctionStart(section, offset));
             }
 
-            if (MatchSwitch(section, offset))
+            if (ReadBE32(section.data + offset) == kBctr)
             {
                 SwitchTable table;
-                if (ReadSwitch(image, section, offset, table))
+                bool isTable;
+                if (ReadSwitch(image, section, offset, table, isTable))
                     switches.push_back(std::move(table));
-                else
+                else if (isTable)
+                {
+                    fmt::println("# Jump table without a readable bounds check at bctr 0x{:X}", section.base + offset);
                     unreadSwitches++;
+                }
             }
         }
     }
@@ -325,7 +453,7 @@ int main(int argc, char* argv[])
     for (size_t i = 0; i < std::size(kJmpPatterns); i++)
         printMatches(kJmpPatterns[i], jmps[i]);
 
-    fmt::println("\n# {} jump tables found, {} matched the pattern but had no readable bounds check", switches.size(), unreadSwitches);
+    fmt::println("\n# {} jump tables found, {} looked like jump tables but had no readable bounds check", switches.size(), unreadSwitches);
 
     std::vector<FunctionRange> pdata = ReadPdata(image);
     std::set<size_t> boundaries;
@@ -426,6 +554,44 @@ int main(int argc, char* argv[])
         else
             extraFunctions.back().size = std::max(extraFunctions.back().size, end - start);
     }
+
+    // A few .pdata functions with jump tables follow a couple of words of data that aren't zero
+    // padding. XenonRecomp would analyse those words as the start of another function that runs
+    // on into the real one and ends at its bctr, so the table's cases land outside it. Naming the
+    // words as a function of their own keeps the analyser out.
+    for (const auto& table : switches)
+    {
+        const FunctionRange* owner = nullptr;
+        size_t previousEnd = 0;
+        for (const auto& fn : pdata)
+        {
+            if (table.base >= fn.base && table.base < fn.base + fn.size)
+                owner = &fn;
+        }
+        if (owner == nullptr)
+            continue;
+        for (const auto& fn : pdata)
+        {
+            if (fn.base + fn.size <= owner->base)
+                previousEnd = std::max(previousEnd, fn.base + fn.size);
+        }
+        const Section* section = nullptr;
+        for (const auto& s : image.sections)
+        {
+            if (s == owner->base)
+                section = &s;
+        }
+        size_t gapStart = owner->base;
+        while (gapStart > previousEnd && owner->base - gapStart < 16 &&
+               ReadBE32(section->data + (gapStart - 4 - section->base)) != 0)
+            gapStart -= 4;
+        bool bounded = gapStart == previousEnd || ReadBE32(section->data + (gapStart - 4 - section->base)) == 0;
+        if (gapStart < owner->base && bounded)
+            extraFunctions.push_back({ gapStart, owner->base - gapStart });
+    }
+    std::sort(extraFunctions.begin(), extraFunctions.end(), [](const FunctionRange& a, const FunctionRange& b) { return a.base < b.base; });
+    extraFunctions.erase(std::unique(extraFunctions.begin(), extraFunctions.end(),
+        [](const FunctionRange& a, const FunctionRange& b) { return a.base == b.base; }), extraFunctions.end());
 
     fmt::println("\n# Functions with jump tables or bdz chains and no .pdata entry. Paste into `functions` in config/bo2_sp.toml.");
     fmt::println("functions = [");
