@@ -662,6 +662,34 @@ float xmul(float a, float b)
                     Line("texLod = " + Reg(op.src(), op.is_src_relative()) + "." + kComp[op.src_swizzle() & 3] + ";");
                     return;
                 }
+                if (op.opcode() == FetchOpcode::kGetTextureGradients)
+                {
+                    // armb02 (Black Ops II): XZ = ddx(source.xy), YW = ddy(source.xy); no
+                    // derivatives outside pixel shaders, so 0 there.
+                    if (op.is_predicated())
+                    {
+                        Line(std::format("if (p0 == {}) {{", op.predicate_condition() ? "true" : "false"));
+                        indent++;
+                    }
+                    std::string src = Reg(op.src(), op.is_src_relative());
+                    uint32_t sw = op.src_swizzle();
+                    std::string xy = std::format("vec2({}.{}, {}.{})", src, kComp[sw & 3], src, kComp[(sw >> 2) & 3]);
+                    Line("{");
+                    indent++;
+                    if (stage == ShaderStage::Pixel)
+                        Line(std::format("vec2 gx = dFdx({}), gy = dFdy({});", xy, xy));
+                    else
+                        Line("vec2 gx = vec2(0.0), gy = vec2(0.0);");
+                    StoreFetchResult(op.dest(), op.is_dest_relative(), op.dest_swizzle(), "vec4(gx.x, gy.x, gx.y, gy.y)");
+                    indent--;
+                    Line("}");
+                    if (op.is_predicated())
+                    {
+                        indent--;
+                        Line("}");
+                    }
+                    return;
+                }
                 if (op.opcode() != FetchOpcode::kTextureFetch)
                 {
                     Error(std::format("texture fetch opcode {} not implemented yet", uint32_t(op.opcode())));
