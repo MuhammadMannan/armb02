@@ -247,7 +247,17 @@ uint32_t ObReferenceObjectByHandle(uint32_t handle, uint32_t objectType, be<uint
 
 uint32_t NtSuspendThread(GuestThreadHandle* hThread, uint32_t* suspendCount)
 {
-    assert(hThread != GetKernelObject(CURRENT_THREAD_HANDLE) && hThread->GetThreadId() == GuestThread::GetCurrentThreadId());
+    // armb02: BO2's fatal error path (Sys_Error) suspends every other game
+    // thread before showing its message. Suspending another host thread isn't
+    // supported, so that is logged and ignored, and the error still reaches
+    // the log instead of failing here.
+    if (hThread == GetKernelObject(CURRENT_THREAD_HANDLE) || hThread->GetThreadId() != GuestThread::GetCurrentThreadId())
+    {
+        fprintf(stderr, "[kernel] NtSuspendThread of another thread ignored\n");
+        if (suspendCount)
+            *suspendCount = 0;
+        return S_OK;
+    }
 
     hThread->suspended = true;
     hThread->suspended.wait(true);
