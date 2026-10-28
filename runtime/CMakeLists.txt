@@ -62,8 +62,8 @@ else()
     find_package(Vulkan REQUIRED)
 endif()
 find_package(glslang REQUIRED CONFIG)
-# FFmpeg for XMA audio: the minimal static build that scripts/setup_tools.sh
-# makes in tools/ffmpeg-xma (with patches/ffmpeg applied: no sample hold-back
+# FFmpeg for XMA audio: the minimal static build that scripts/build_ffmpeg_xma.sh
+# makes in thirdparty/ffmpeg-xma (with patches/ffmpeg applied: no sample hold-back
 # for single-stream XMA, which the game's audio mixer depends on).
 if(ARMB02_XMA)
     set(FFMPEG_XMA ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ffmpeg-xma CACHE PATH "FFmpeg-XMA's install prefix")

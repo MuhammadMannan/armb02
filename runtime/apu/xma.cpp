@@ -263,10 +263,10 @@ namespace
         {
             // XMA1 (packet header: 4-bit sequence number) or XMA2 (6-bit
             // frame count); the frame offset and skip fields are in the same
-            // place, and the synthetic packets below work for both. NFSMW
-            // (2005) uses XMA1; NFSMW_XMA=2 switches.
+            // place, and the synthetic packets below work for both. armb02:
+            // Black Ops II (2012) uses XMA2; NFSMW_XMA=1 switches.
             const char* v = std::getenv("NFSMW_XMA");
-            s_codec = avcodec_find_decoder(v && v[0] == '2' ? AV_CODEC_ID_XMA2 : AV_CODEC_ID_XMA1);
+            s_codec = avcodec_find_decoder(v && v[0] == '1' ? AV_CODEC_ID_XMA1 : AV_CODEC_ID_XMA2);
             s_packet = av_packet_alloc();
             s_frame = av_frame_alloc();
             if (!s_codec)
