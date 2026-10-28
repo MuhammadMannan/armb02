@@ -1,0 +1,42 @@
+# XenonRecomp config for the Black Ops 2 campaign executable.
+# Paths are relative to this file. Everything under ../private and ../ppc is
+# local only and ignored by git.
+
+[main]
+file_path = "../private/default.xex"
+patch_file_path = "../private/default.xexp"
+patched_file_path = "../private/default_patched.xex"
+out_directory_path = "../ppc"
+switch_table_file_path = "bo2_sp_switch_tables.toml"
+
+# Leave optimizations off until the recompiled game boots.
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Register save/restore helpers. Fill these in from `bo2scan` output.
+# restgprlr_14_address = 0x00000000
+# savegprlr_14_address = 0x00000000
+# restfpr_14_address = 0x00000000
+# savefpr_14_address = 0x00000000
+# restvmx_14_address = 0x00000000
+# savevmx_14_address = 0x00000000
+# restvmx_64_address = 0x00000000
+# savevmx_64_address = 0x00000000
+
+# longjmp_address = 0x00000000
+# setjmp_address = 0x00000000
+
+# Manual function boundaries for anything XenonAnalyse gets wrong.
+functions = [
+]
+
+# Non-code data between functions (exception tables, padding) to skip.
+invalid_instructions = [
+    { data = 0x00000000, size = 4 }, # Padding
+]
