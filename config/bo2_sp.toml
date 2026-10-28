@@ -1,6 +1,9 @@
 # XenonRecomp config for the Black Ops 2 campaign executable.
 # Paths are relative to this file. Everything under ../private and ../ppc is
 # local only and ignored by git.
+#
+# Recompiled from default.xex SHA-256 3b679d48bfee1d2fdd6fdb826bd30481607c45307fd74aaa949045182ab3b3f4
+# with title update v18, default.xexp SHA-256 690c279d12f1a79535bd2e9dae52f9a861c847493821aefa9bc20ed3aa507655
 
 [main]
 file_path = "../private/default.xex"
@@ -34,8 +37,9 @@ savevmx_64_address = 0x826EB704
 setjmp_address = 0x826EC320
 longjmp_address = 0x826EC7B0
 
-# Functions that contain jump tables or bdz chains but have no .pdata entry (from
-# `bo2scan`). XenonRecomp's analyser would otherwise end them at the bctr or last bdz.
+# Functions that contain jump tables or bdz chains but have no .pdata entry, and the
+# few words of data before some table functions (from `bo2scan`). XenonRecomp's
+# analyser would otherwise end them at the bctr or last bdz.
 functions = [
     { address = 0x8210D2E8, size = 0xA8 },
     { address = 0x82176028, size = 0x68 },
@@ -49,6 +53,7 @@ functions = [
     { address = 0x822022E8, size = 0x43C },
     { address = 0x822DECC0, size = 0x1A4 },
     { address = 0x822DEE68, size = 0xFC },
+    { address = 0x82369440, size = 0x8 },
     { address = 0x82374220, size = 0x64 },
     { address = 0x823941C0, size = 0xD4 },
     { address = 0x823AAD90, size = 0x124 },
@@ -65,16 +70,22 @@ functions = [
     { address = 0x82422850, size = 0xF8 },
     { address = 0x82424CE8, size = 0x70 },
     { address = 0x8242F388, size = 0xDC },
+    { address = 0x8246E080, size = 0x8 },
     { address = 0x82494878, size = 0x178 },
     { address = 0x82494D78, size = 0x44 },
     { address = 0x825054A0, size = 0x8C },
     { address = 0x82557630, size = 0x168 },
+    { address = 0x825578F8, size = 0x8 },
     { address = 0x82557D90, size = 0xB2C },
     { address = 0x82558E68, size = 0x6C },
     { address = 0x825598F8, size = 0x80 },
     { address = 0x8255AC00, size = 0x130 },
     { address = 0x82562560, size = 0x5C },
+    { address = 0x825D8960, size = 0x270 },
     { address = 0x826073F8, size = 0x84 },
+    { address = 0x82651CA0, size = 0x8 },
+    { address = 0x82661090, size = 0x8 },
+    { address = 0x8266B658, size = 0x8 },
     { address = 0x8269CFF8, size = 0x1B4 },
     { address = 0x826C05B8, size = 0x2C0 },
 ]
