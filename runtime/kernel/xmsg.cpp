@@ -163,6 +163,13 @@ uint32_t XMsgStartIORequest(uint32_t app, uint32_t message, XXOVERLAPPED* overla
     return result;
 }
 
+// armb02: the Ex form (Black Ops II) takes one more argument, unused here, as in Xenia.
+uint32_t XMsgStartIORequestEx(uint32_t app, uint32_t message, XXOVERLAPPED* overlapped, uint32_t buffer, uint32_t length,
+    uint32_t unknown)
+{
+    return XMsgStartIORequest(app, message, overlapped, buffer, length);
+}
+
 uint32_t XMsgCancelIORequest(XXOVERLAPPED* overlapped, uint32_t wait)
 {
     return 0;  // every request completes immediately
@@ -171,4 +178,5 @@ uint32_t XMsgCancelIORequest(XXOVERLAPPED* overlapped, uint32_t wait)
 GUEST_FUNCTION_HOOK(__imp__XMsgInProcessCall, XMsgInProcessCall);
 GUEST_FUNCTION_HOOK(__imp__XMsgSystemProcessCall, XMsgSystemProcessCall);
 GUEST_FUNCTION_HOOK(__imp__XMsgStartIORequest, XMsgStartIORequest);
+GUEST_FUNCTION_HOOK(__imp__XMsgStartIORequestEx, XMsgStartIORequestEx);
 GUEST_FUNCTION_HOOK(__imp__XMsgCancelIORequest, XMsgCancelIORequest);

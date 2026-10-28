@@ -148,6 +148,8 @@ namespace
         uint32_t tableAddress = 0, loadSize = 0, scaled = UINT32_MAX, shift = 0, sum = UINT32_MAX, codeBase = 0, ctr = UINT32_MAX;
         size_t tableLis = 0;
         std::map<uint32_t, size_t> lisAt;
+        std::map<uint32_t, uint32_t> scaledFrom;  // rlwinm rD,rS,2,0,29 before the load: rD -> rS
+        uint32_t index = UINT32_MAX;              // the register the table load is indexed by
         for (size_t at = first; at < bctr; at += 4)
         {
             ppc::Disassemble(section.data + at, section.base + at, insn);
@@ -178,6 +180,8 @@ namespace
                 uint32_t reg = known.count(o[1]) ? o[1] : known.count(o[2]) ? o[2] : UINT32_MAX;
                 if (reg == UINT32_MAX)
                     return false;
+                uint32_t offsetReg = reg == o[1] ? o[2] : o[1];
+                index = scaledFrom.count(offsetReg) ? scaledFrom[offsetReg] : offsetReg;
                 tableAddress = known[reg];
                 tableLis = lisAt[reg];
                 loadSize = insn.opcode->id == PPC_INST_LWZX ? 4 : insn.opcode->id == PPC_INST_LHZX ? 2 : 1;
@@ -192,7 +196,11 @@ namespace
                     scaled = o[0];
                 }
                 else
+                {
                     known.erase(o[0]);
+                    if (loadSize == 0 && o[2] == 2 && o[3] == 0 && o[4] == 29)
+                        scaledFrom[o[0]] = o[1];
+                }
                 break;
             case PPC_INST_ADD:
                 if (o[1] == scaled && known.count(o[2]))
@@ -249,11 +257,36 @@ namespace
             }
         }
 
-        if (count == 0)
-            return false;
-
         auto* entries = static_cast<const uint8_t*>(image.Find(tableAddress));
         if (entries == nullptr)
+            return false;
+
+        // No bounds check in reach (zlib's inflate checks its mode elsewhere): an absolute table
+        // that the code right after it is the lowest target of, as compilers lay them out, ends
+        // where that code starts.
+        if (count == 0 && absolute && index != UINT32_MAX)
+        {
+            uint32_t lowest = UINT32_MAX;
+            for (size_t i = 0; i < 1024; i++)
+            {
+                uint32_t at = tableAddress + uint32_t(i * 4);
+                if (at == lowest)
+                {
+                    count = i;
+                    break;
+                }
+                uint32_t label = ReadBE32(entries + i * 4);
+                if (label <= tableAddress || label < section.base || label >= section.base + section.size || (label & 3))
+                    break;
+                lowest = std::min(lowest, label);
+            }
+            if (count == 0)
+                return false;
+            table.r = index;
+            table.defaultLabel = ReadBE32(entries);
+        }
+
+        if (count == 0)
             return false;
 
         // Keyed at the lis of the table address, as XenonAnalyse does; no other bctr lies between it and ours.

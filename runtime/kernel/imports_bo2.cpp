@@ -170,3 +170,11 @@ PPC_FUNC(sub_823802C0)
     }
     __imp__sub_823802C0(ctx, base);
 }
+
+// XamBackgroundDownloadSetMode(mode): whether the console may download content in the
+// background while the title runs; there are no downloads.
+void XamBackgroundDownloadSetMode(uint32_t mode)
+{
+}
+
+GUEST_FUNCTION_HOOK(__imp__XamBackgroundDownloadSetMode, XamBackgroundDownloadSetMode);
