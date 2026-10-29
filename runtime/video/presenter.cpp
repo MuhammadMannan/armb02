@@ -1718,6 +1718,10 @@ void main()
         setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
 #endif
 #ifdef __APPLE__
+        // armb02: fast math only where a shader allows it: the vertex shaders ask for exact float
+        // rounding (SignedZeroInfNanPreserve, shader_translator.cpp) so a depth pre-pass and the colour
+        // pass after it compute the same positions. MVK_CONFIG_FAST_MATH_ENABLED set by hand still wins.
+        setenv("MVK_CONFIG_FAST_MATH_ENABLED", "2", 0);
         // SpeedBreaker.app (scripts/macos/make_app.py) carries MoltenVK and
         // its manifest: the Vulkan loader uses only that driver, not one a
         // Homebrew install also has (two MoltenVKs, the system's chosen).

@@ -23,6 +23,7 @@ namespace gpu
     {
         return R"(#version 460
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_spirv_intrinsics : require
 
 layout(std430, set = 0, binding = 0) readonly buffer SharedMemory { uint g_mem[]; };)" GLSL_SHARED_MEMORY_READ R"(
 // The renderer's ring: small vertex ranges copied when the draw was recorded
@@ -1165,6 +1166,13 @@ vec3 cubeDirection(vec3 c)
                     g += std::format("layout(location = {0}) out vec4 o_i{0};\n", i);
             g += "vec4 o_interpT[16];\n";
             g += "out gl_PerVertex { invariant vec4 gl_Position; float gl_PointSize; };\n";
+            // armb02: `invariant` alone did not keep positions identical across passes on Metal: fast
+            // math let each vertex shader round its own way, and BO2's colour passes (depth func EQUAL
+            // after its depth pre-pass) left black triangles and stippled black blocks where they missed.
+            // SignedZeroInfNanPreserve (4461, capability 4466) has MoltenVK compile the vertex shaders
+            // without fast math (MVK_CONFIG_FAST_MATH_ENABLED=2, set in the presenter); pixel shaders,
+            // most of the cost, keep it.
+            g += "spirv_execution_mode(extensions = [\"SPV_KHR_float_controls\"], capabilities = [4466], 4461, 32);\n";
         }
         else
         {
