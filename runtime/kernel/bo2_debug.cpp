@@ -90,6 +90,30 @@ PPC_FUNC_IMPL(__imp__sub_823CFE40);
 PPC_FUNC(sub_823CFE40)
 {
     static const bool skipIntro = [] { const char* v = std::getenv("ARMB02_SKIP_INTRO"); return v && v[0] == '1'; }();
+    // ARMB02_DVARS="sm_sunEnable=0,r_foo=1": a bool dvar registered with that default instead
+    // (a bring-up aid: turn one renderer feature off and see what changes).
+    static const std::unordered_map<std::string, bool> overrides = [] {
+        std::unordered_map<std::string, bool> out;
+        if (const char* v = std::getenv("ARMB02_DVARS"))
+            for (std::string all = v; !all.empty();)
+            {
+                const size_t comma = all.find(',');
+                const std::string item = all.substr(0, comma);
+                all = comma == std::string::npos ? std::string() : all.substr(comma + 1);
+                if (const size_t eq = item.find('='); eq != std::string::npos)
+                    out[item.substr(0, eq)] = item[eq + 1] == '1';
+            }
+        return out;
+    }();
+    if (!overrides.empty())
+    {
+        auto it = overrides.find(reinterpret_cast<const char*>(base + ctx.r3.u32));
+        if (it != overrides.end())
+        {
+            fprintf(stderr, "[game] %s registered as %u (ARMB02_DVARS)\n", it->first.c_str(), unsigned(it->second));
+            ctx.r4.u64 = it->second;
+        }
+    }
     if (skipIntro && ctx.r3.u32 == 0x82042C78)
     {
         fprintf(stderr, "[game] com_introPlayed registered as 1 (ARMB02_SKIP_INTRO)\n");
