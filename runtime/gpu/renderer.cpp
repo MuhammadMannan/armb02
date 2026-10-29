@@ -1934,6 +1934,14 @@ namespace gpu::renderer
             // iPhone or iPad the chip's (video/scale_budget: 1 on every chip
             // measured so far).
             video::AutoRenderScale(regionW, regionH, s_scaleBudget, sx, sy);
+            // armb02: BO2 draws its 3D view 880 wide and stretches it to 1280 itself, so the
+            // budget's 2x2 on a 2560-wide picture gave the scene only 1760 columns. Auto widens
+            // the horizontal scale until 880 guest columns cover the picture (3x2 there, at most
+            // 3; ~33 fps instead of ~40 in Angola on an M1 Pro). The HUD and post passes get the
+            // same scale (one scale for every surface). ARMB02_SCENE_FULL_WIDTH=0: the budget's.
+            static const bool s_sceneFullWidth = [] { const char* v = std::getenv("ARMB02_SCENE_FULL_WIDTH"); return !(v && v[0] == '0'); }();
+            if (s_sceneFullWidth && regionW > 0 && sx > 1)
+                sx = std::max(sx, std::min(3u, (regionW + 879) / 880));
             return gpu::RenderScale::Whole(sx, sy);
         }
 
