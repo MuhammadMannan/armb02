@@ -786,8 +786,13 @@ float xmul(float a, float b)
                         uv = op.dimension() == xenos::FetchOpDimension::k2D
                             ? std::format("({}) / fetchSize2D({}u)", uv, slot)
                             : std::format("({}) / vec2(textureSize(t2d_{}, 0))", uv, slot);
+                    // armb02: the offsets count guest texels too: at a scaled internal resolution the
+                    // image's size made them a half (2x) or a third (3x) of a texel, and BO2's
+                    // downsampling passes gathered the wrong texels (16x16 black blocks at 2x).
                     if (op.offset_x() != 0.0f || op.offset_y() != 0.0f)
-                        uv = std::format("({} + vec2({}, {}) / vec2(textureSize(t2d_{}, 0)))", uv, op.offset_x(), op.offset_y(), slot);
+                        uv = std::format("({} + vec2({}, {}) / {})", uv, op.offset_x(), op.offset_y(),
+                            op.dimension() == xenos::FetchOpDimension::k2D ? std::format("fetchSize2D({}u)", slot)
+                                                                            : std::format("vec2(textureSize(t2d_{}, 0))", slot));
                     value = sample(std::format("t2d_{}", slot), uv);
                     break;
                 }
